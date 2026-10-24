@@ -1,20 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { CI_LIMITS } from "./ci.ts";
-import { type Config, reviewFileName, runPipeline } from "./pipeline.ts";
-import { checks, pipelineHarness } from "./testing/helpers.ts";
+import { reviewFileName, runPipeline } from "./pipeline.ts";
+import { assignee, checks, pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
-const cfg: Config = {
-  impl: { agent: "claude" },
-  reviewers: [{ agent: "agy" }, { agent: "copilot" }],
-  maxRounds: 3,
-  baseSha: "sha0",
-};
+const cfg = pipelineConfig(assignee("claude"), [assignee("agy"), assignee("copilot")]);
 
 describe("runPipeline: 基本の流れ", () => {
   test("実装 → レビュー → 直すもの無しで完了し、最後に要約する", async () => {
     const h = pipelineHarness({ commits: [true, false] });
     expect(await runPipeline(cfg, h.deps)).toEqual({ kind: "done" });
-    expect(h.calls.map((c) => `${c.spec.agent}:${c.kind}`)).toEqual([
+    expect(h.calls.map((c) => `${c.inv.agent}:${c.kind}`)).toEqual([
       "claude:implement",
       "agy:review",
       "copilot:review",
@@ -201,15 +196,98 @@ describe("runPipeline: レビュー担当の失敗", () => {
   });
 });
 
+describe("runPipeline: モデルの切り替え", () => {
+  const claude = assignee("claude", "c1", "c2");
+  const agy = assignee("agy", "a1", "a2");
+  const models = (h: ReturnType<typeof pipelineHarness>, kind: string) =>
+    h.calls.filter((c) => c.kind === kind).map((c) => c.inv.model);
+
+  test("レビュー担当が失敗したら、次のモデルで試し直す", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      failAgent: (inv) => inv.model === "a1",
+    });
+    expect(await runPipeline(pipelineConfig(claude, [agy]), h.deps)).toEqual({ kind: "done" });
+    expect(models(h, "review")).toEqual(["a1", "a2"]);
+    expect(h.logs).toContain("agy:a1 が失敗した。agy:a2 で試し直す");
+  });
+
+  test("一度失敗したモデルは、次のラウンドでは後回しにする", async () => {
+    const h = pipelineHarness({
+      commits: [true, true, false],
+      failAgent: (inv) => inv.model === "a1",
+    });
+    await runPipeline(pipelineConfig(claude, [agy]), h.deps);
+    expect(models(h, "review")).toEqual(["a1", "a2", "a2"]);
+  });
+
+  test("並びが全部失敗したら、その担当は失敗にする（下の段階には落とさない）", async () => {
+    const h = pipelineHarness({ commits: [true], failAgent: (_, k) => k === "review" });
+    expect((await runPipeline(pipelineConfig(claude, [agy]), h.deps)).kind).toBe("needs-human");
+    expect(models(h, "review")).toEqual(["a1", "a2"]);
+  });
+
+  test("実装担当が何も変えずに失敗したら、次のモデルで実装する", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      failAgent: (inv, k) => k === "implement" && inv.model === "c1",
+    });
+    expect(await runPipeline(pipelineConfig(claude, [agy]), h.deps)).toEqual({ kind: "done" });
+    expect(models(h, "implement")).toEqual(["c1", "c2"]);
+  });
+
+  test("実装担当が途中まで書き換えて失敗したら、続きが混ざるので切り替えない", async () => {
+    const h = pipelineHarness({
+      commits: [true],
+      failAgent: (inv, k) => k === "implement" && inv.model === "c1",
+      dirtyOnFail: () => true,
+    });
+    expect(await runPipeline(pipelineConfig(claude, [agy]), h.deps)).toEqual({
+      kind: "failed",
+      reason: "実装担当が異常終了した",
+    });
+    expect(models(h, "implement")).toEqual(["c1"]);
+  });
+
+  test("修正担当も、途中まで書き換えて失敗したら切り替えない", async () => {
+    const h = pipelineHarness({
+      commits: [true],
+      failAgent: (inv, k) => k === "fix" && inv.model === "c1",
+      dirtyOnFail: () => true,
+    });
+    expect((await runPipeline(pipelineConfig(claude, [agy]), h.deps)).kind).toBe("failed");
+    expect(models(h, "fix")).toEqual(["c1"]);
+  });
+
+  test("作業ごとに別の並びを使う（実装・修正・要約・レビュー）", async () => {
+    const h = pipelineHarness({ commits: [true, false] });
+    await runPipeline(
+      {
+        ...pipelineConfig(assignee("claude", "hi"), [assignee("agy", "rv")]),
+        summarize: assignee("claude", "lo"),
+      },
+      h.deps,
+    );
+    expect(h.calls.map((c) => `${c.kind}=${c.inv.model}`)).toEqual([
+      "implement=hi",
+      "review=rv",
+      "fix=hi",
+      "summarize=lo",
+    ]);
+  });
+});
+
 describe("reviewFileName", () => {
   test("同じエージェントをモデル違いで並べても衝突しない", () => {
-    const a = reviewFileName({ agent: "agy", model: "gemini-3.8-flash-high" }, 1);
-    const b = reviewFileName({ agent: "agy", model: "gemini-3.8-pro" }, 1);
+    const a = reviewFileName(assignee("agy", "model-a"), 1);
+    const b = reviewFileName(assignee("agy", "model-b"), 1);
     expect(a).not.toBe(b);
-    expect(a).toBe("review-1-agy-gemini-3.8-flash-high.md");
+    expect(a).toBe("review-1-agy-model-a.md");
   });
 
   test("ファイル名に使えない文字を残さない", () => {
-    expect(reviewFileName({ agent: "claude", model: "a/b c" }, 2)).toBe("review-2-claude-a-b-c.md");
+    expect(reviewFileName(assignee("claude", "a b", "c@high"), 2)).toBe(
+      "review-2-claude-a-b-c-high.md",
+    );
   });
 });

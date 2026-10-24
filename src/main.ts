@@ -9,7 +9,14 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
-import { AGENTS, type AgentSpec, buildArgv, formatAgentSpec, parseAgentSpec } from "./agents.ts";
+import {
+  AGENTS,
+  type AgentSpec,
+  buildArgv,
+  formatAgentSpec,
+  formatInvocation,
+  parseAgentSpec,
+} from "./agents.ts";
 import { capture, killAll, run } from "./exec.ts";
 import {
   currentBranch,
@@ -19,18 +26,47 @@ import {
   headSha,
   realGitHub,
   resolveBaseSha,
+  worktreeFingerprint,
 } from "./github.ts";
+import {
+  type Assignee,
+  assignRoles,
+  DEFAULT_LEVEL,
+  formatModelTable,
+  LEVELS,
+  type Level,
+  loadModelTable,
+  MODELS_PATH,
+  type ModelTable,
+} from "./models.ts";
 import { formatOutcome, runPipeline } from "./pipeline.ts";
 import { STATE_DIR, State } from "./state.ts";
 
-const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--max-rounds N] [--local]
+const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--level LEVEL] [--max-rounds N] [--local]
        autopilot-run status
        autopilot-run stop
+       autopilot-run models [--file PATH]
 
-  AGENT        ${AGENTS.join(" | ")}。モデルは agy:gemini-3.8-flash-high のように付ける（既定: claude）
+  AGENT        ${AGENTS.join(" | ")}（既定: claude）。
+               モデルは models.yaml の並びを使う。決め打ちするときは AGENT:MODEL@EFFORT/MODEL と書く（/ の順に試す）
   --reviewers  レビュー担当（既定: 実装担当以外で PATH にあるもの全部）
+  --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューは high、要約は light で固定
   --max-rounds 修正ループの上限（1〜10、既定: 3）
-  --local      push・PR・CI を行わず、ローカルの差分だけで回す（試運転用）`;
+  --local      push・PR・CI を行わず、ローカルの差分だけで回す（試運転用）
+  models       段階ごとのモデルの並びを表示する。--file で別のファイルを検査する
+
+  models.yaml  $AUTOPILOT_MODELS（既定: ${MODELS_PATH}）。無ければ各 CLI の既定モデルで動く`;
+
+const modelsPath = () => process.env.AUTOPILOT_MODELS || MODELS_PATH;
+
+/** models.yaml を読む。書き間違いは起動前に拒否する。 */
+function readModels(path: string): ModelTable | null {
+  try {
+    return loadModelTable(path);
+  } catch (e) {
+    throw new UsageError(`${path}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
 /** 起動を拒否する理由。使い方の誤りなので終了コード 2 で返す。 */
 class UsageError extends Error {}
@@ -38,13 +74,20 @@ class UsageError extends Error {}
 export interface StartOptions {
   impl: AgentSpec;
   reviewers: AgentSpec[];
+  level: Level;
   maxRounds: number;
   local: boolean;
 }
 
 /** 引数を読み、起動してよいかを確かめる。PATH の探索は findAgent に任せる。 */
 export async function parseStartOptions(
-  values: { impl: string; reviewers?: string; "max-rounds": string; local: boolean },
+  values: {
+    impl: string;
+    reviewers?: string;
+    level?: string;
+    "max-rounds": string;
+    local: boolean;
+  },
   findAgent: (name: string) => Promise<boolean>,
 ): Promise<StartOptions> {
   let impl: AgentSpec;
@@ -54,6 +97,11 @@ export async function parseStartOptions(
     if (values.reviewers) explicit = values.reviewers.split(",").map(parseAgentSpec);
   } catch (e) {
     throw new UsageError(e instanceof Error ? e.message : String(e));
+  }
+
+  const level = (values.level ?? DEFAULT_LEVEL) as Level;
+  if (!LEVELS.includes(level)) {
+    throw new UsageError(`--level は ${LEVELS.join(" / ")} のどれか: ${values.level}`);
   }
 
   const maxRounds = Number(values["max-rounds"]);
@@ -71,7 +119,7 @@ export async function parseStartOptions(
   } else {
     reviewers = [];
     for (const agent of AGENTS) {
-      if (agent !== impl.agent && (await findAgent(agent))) reviewers.push({ agent });
+      if (agent !== impl.agent && (await findAgent(agent))) reviewers.push({ agent, models: [] });
     }
   }
   if (reviewers.length === 0) {
@@ -79,7 +127,7 @@ export async function parseStartOptions(
       `レビュー担当がいない。--reviewers で指定するか、${impl.agent} 以外のエージェント CLI を PATH に入れる`,
     );
   }
-  return { impl, reviewers, maxRounds, local: values.local };
+  return { impl, reviewers, level, maxRounds, local: values.local };
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -89,13 +137,28 @@ async function main(argv: string[]): Promise<number> {
     options: {
       impl: { type: "string", default: "claude" },
       reviewers: { type: "string" },
+      level: { type: "string" },
       "max-rounds": { type: "string", default: "3" },
+      file: { type: "string" },
       local: { type: "boolean", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
   });
   if (values.help) {
     console.log(USAGE);
+    return 0;
+  }
+
+  // models は worktree の外（nix のビルドでの検査）でも動かす。
+  if (positionals[0] === "models") {
+    const path = values.file ?? modelsPath();
+    const table = readModels(path);
+    if (!table) {
+      if (values.file) throw new UsageError(`${path} が無い`);
+      console.log(`${path} が無い。各 CLI の既定モデルで動く`);
+      return 0;
+    }
+    console.log(`${path}\n${formatModelTable(table)}`);
     return 0;
   }
 
@@ -136,6 +199,7 @@ async function main(argv: string[]): Promise<number> {
     values,
     async (name) => (await capture(["sh", "-c", `command -v ${name}`], root)).code === 0,
   );
+  const models = readModels(modelsPath());
 
   // 既定ブランチへの直接 commit は、ブランチ保護の有無に関わらず起こさせない。
   const branch = await currentBranch(root);
@@ -160,7 +224,7 @@ async function main(argv: string[]): Promise<number> {
   for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, stop);
 
   try {
-    const outcome = await start(state, root, base, opts);
+    const outcome = await start(state, root, base, opts, models);
     state.stage(formatOutcome(outcome));
     return outcome.kind === "failed" ? 1 : 0;
   } catch (e) {
@@ -177,19 +241,35 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-async function start(state: State, root: string, base: string | null, opts: StartOptions) {
+async function start(
+  state: State,
+  root: string,
+  base: string | null,
+  opts: StartOptions,
+  models: ModelTable | null,
+) {
   const logPath = state.file("run.log");
   const baseSha = await resolveBaseSha(root, base);
   state.log(
-    `start impl=${formatAgentSpec(opts.impl)} reviewers=${opts.reviewers.map(formatAgentSpec).join(",")} base=${baseSha.slice(0, 8)}${opts.local ? " (local)" : ""}`,
+    `start impl=${formatAgentSpec(opts.impl)} level=${opts.level} reviewers=${opts.reviewers.map(formatAgentSpec).join(",")} base=${baseSha.slice(0, 8)}${opts.local ? " (local)" : ""}`,
+  );
+  if (!models) state.log(`${modelsPath()} が無いので、各 CLI の既定モデルで動く`);
+  const roles = assignRoles(opts, models ?? {});
+  const chain = (a: Assignee) => a.chain.map(formatInvocation).join(" → ");
+  state.log(
+    [
+      `models: implement=${chain(roles.implement)}`,
+      `summarize=${chain(roles.summarize)}`,
+      ...roles.reviewers.map((r) => `review(${r.name})=${chain(r)}`),
+    ].join(" "),
   );
 
   return runPipeline(
-    { impl: opts.impl, reviewers: opts.reviewers, maxRounds: opts.maxRounds, baseSha },
+    { ...roles, maxRounds: opts.maxRounds, baseSha },
     {
-      async runAgent(spec: AgentSpec, prompt: string, outputName?: string) {
-        state.log(`-> ${formatAgentSpec(spec)}`);
-        const r = await run(buildArgv(spec, prompt), {
+      async runAgent(inv, prompt, outputName) {
+        state.log(`-> ${formatInvocation(inv)}`);
+        const r = await run(buildArgv(inv, prompt), {
           cwd: root,
           logPath,
           stdoutPath: outputName ? state.file(outputName) : undefined,
@@ -197,6 +277,7 @@ async function start(state: State, root: string, base: string | null, opts: Star
         return r.code === 0;
       },
       head: () => headSha(root),
+      fingerprint: () => worktreeFingerprint(root),
       github: opts.local ? null : realGitHub(root),
       clock: { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) },
       state,

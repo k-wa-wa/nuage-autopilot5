@@ -3,11 +3,13 @@
 # - autopilot-run を PATH に入れる。
 # - home/ の共通ルールとスキルを、各エージェント CLI がホーム全体で読む場所へ symlink する。
 #   リポジトリの .agents/skills ではそのリポジトリでしか効かないため、ホーム側に置く。
+# - 段階ごとのモデルの並び (models.yaml) を /etc/autopilot5/models.yaml に置く。
 #
 # ~/.claude/settings.json などエージェントや Orca が書き換えるファイルには触れない。
 {
   config,
   lib,
+  pkgs,
   ...
 }:
 
@@ -35,6 +37,13 @@ let
   };
 
   skillNames = builtins.attrNames (builtins.readDir skills);
+
+  # 書き間違いは実行時ではなくビルド時に落とす (autoUpgrade が失敗として見える)。
+  checkedModels = pkgs.runCommand "autopilot5-models.yaml" { } ''
+    export HOME=$TMPDIR
+    ${lib.getExe cfg.package} models --file ${cfg.models}
+    cp ${cfg.models} $out
+  '';
 
   # "a/b/c" → [ "a" "a/b" "a/b/c" ]。新しいホストでは途中のディレクトリも無い。
   ancestors =
@@ -70,6 +79,16 @@ in
       description = "エージェントを動かすユーザー。このユーザーのホームに共通ルールとスキルを置く。";
     };
 
+    models = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      example = lib.literalExpression "./models.yaml";
+      description = ''
+        段階 (high / standard / light) ごとのモデルの並び。エージェント → 段階 → 前から順に試すモデルで書く。
+        モデルは頻繁に変わるので、モデル名はこのファイルだけに書く。null なら各 CLI の既定モデルで動く。
+      '';
+    };
+
     agents = lib.mkOption {
       type = lib.types.listOf (lib.types.enum (builtins.attrNames targets));
       default = builtins.attrNames targets;
@@ -79,6 +98,9 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
+    environment.etc."autopilot5/models.yaml" = lib.mkIf (cfg.models != null) {
+      source = checkedModels;
+    };
     systemd.tmpfiles.rules = lib.concatMap rulesFor cfg.agents;
   };
 }

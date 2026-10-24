@@ -1,43 +1,97 @@
 /**
  * エージェント CLI ごとの違いはここだけに閉じる。
- * 他のモジュールは「どのエージェントに、どのプロンプトを渡すか」しか知らない。
+ * 他のモジュールは「どのエージェントに、どのモデルで、どのプロンプトを渡すか」しか知らない。
  */
 
 export const AGENTS = ["claude", "agy", "copilot"] as const;
 export type AgentName = (typeof AGENTS)[number];
 
-export interface AgentSpec {
-  agent: AgentName;
+/** 1 回の実行で使うモデルと effort。省略したものは CLI の既定になる。 */
+export interface ModelChoice {
   model?: string;
+  effort?: string;
 }
 
-/** `agy` や `agy:gemini-3.8-flash-high` を読む。 */
+/** エージェントを 1 回実行する単位。 */
+export interface Invocation extends ModelChoice {
+  agent: AgentName;
+}
+
+/**
+ * 担当の指定。models は前から順に試す並びで、空なら models.yaml の並びを使う。
+ * 書き方: `agy`、`agy:MODEL`、`claude:MODEL@EFFORT/MODEL`
+ */
+export interface AgentSpec {
+  agent: AgentName;
+  models: ModelChoice[];
+}
+
+/** `MODEL`、`MODEL@EFFORT`、`@EFFORT` を読む。 */
+export function parseModelChoice(text: string): ModelChoice {
+  const t = text.trim();
+  const at = t.lastIndexOf("@");
+  const model = at === -1 ? t : t.slice(0, at);
+  const effort = at === -1 ? "" : t.slice(at + 1);
+  if (!model && !effort) throw new Error(`モデルが空: "${text}"`);
+  if (at !== -1 && !effort) throw new Error(`@ の後に effort が無い: "${text}"`);
+  return { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
+}
+
+export function formatModelChoice(m: ModelChoice): string {
+  return `${m.model ?? ""}${m.effort ? `@${m.effort}` : ""}`;
+}
+
 export function parseAgentSpec(text: string): AgentSpec {
-  const [agent, ...rest] = text.trim().split(":");
+  const t = text.trim();
+  const colon = t.indexOf(":");
+  const agent = colon === -1 ? t : t.slice(0, colon);
   if (!AGENTS.includes(agent as AgentName)) {
     throw new Error(`unknown agent: ${agent}（${AGENTS.join(" / ")}）`);
   }
-  const model = rest.join(":");
-  return model ? { agent: agent as AgentName, model } : { agent: agent as AgentName };
+  const rest = colon === -1 ? "" : t.slice(colon + 1);
+  const models = rest ? rest.split("/").map(parseModelChoice) : [];
+  return { agent: agent as AgentName, models };
 }
 
 export function formatAgentSpec(spec: AgentSpec): string {
-  return spec.model ? `${spec.agent}:${spec.model}` : spec.agent;
+  return spec.models.length > 0
+    ? `${spec.agent}:${spec.models.map(formatModelChoice).join("/")}`
+    : spec.agent;
+}
+
+export function formatInvocation(inv: Invocation): string {
+  const m = formatModelChoice(inv);
+  return m ? `${inv.agent}:${m}` : inv.agent;
 }
 
 /**
  * 非対話で 1 ターン実行するコマンド。
  * 人間は不在なので、どのエージェントも権限確認を飛ばす。
  */
-export function buildArgv(spec: AgentSpec, prompt: string): string[] {
-  const model = spec.model ? ["--model", spec.model] : [];
-  switch (spec.agent) {
+export function buildArgv(inv: Invocation, prompt: string): string[] {
+  const model = inv.model ? ["--model", inv.model] : [];
+  const effort = (flag: string) => (inv.effort ? [flag, inv.effort] : []);
+  switch (inv.agent) {
     case "claude":
-      return ["claude", ...model, "--dangerously-skip-permissions", "-p", prompt];
+      return [
+        "claude",
+        ...model,
+        ...effort("--effort"),
+        "--dangerously-skip-permissions",
+        "-p",
+        prompt,
+      ];
     case "agy":
       // agy の -p は直後の引数をプロンプトとして読むので、必ず末尾に置く。
-      return ["agy", ...model, "--dangerously-skip-permissions", "-p", prompt];
+      return [
+        "agy",
+        ...model,
+        ...effort("--effort"),
+        "--dangerously-skip-permissions",
+        "-p",
+        prompt,
+      ];
     case "copilot":
-      return ["copilot", ...model, "--yolo", "-p", prompt];
+      return ["copilot", ...model, ...effort("--reasoning-effort"), "--yolo", "-p", prompt];
   }
 }

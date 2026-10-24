@@ -38,6 +38,8 @@ nix build path:.#autopilot-run
 
 - 流れ（順序と待ち）は `src/pipeline.ts` だけが持つ。判断は LLM に任せ、コードに分岐を足さない。
 - エージェント CLI ごとの違いは `src/agents.ts` だけに、gh の呼び出しは `src/github.ts` だけに、CI の判定は `src/ci.ts` だけに閉じる。
+- 作業ごとの賢さは `src/models.ts` だけが決める。実在のモデル名はコード・テスト・`home/` に書かず、ホストの `models.yaml` だけに書く。
+- モデルを切り替えるのは、失敗して作業ツリーが何も変わっていないときだけにする。
 - 成否はエージェントの自己申告ではなく、commit・PR・push が実際にできたかで判定する。
 - GitHub の状態は push 直後に揃わない。PR の HEAD がローカルと一致するまで CI の結果を読まない。
 - 窓口とのやりとりは `.autopilot/` のファイルだけで行う。

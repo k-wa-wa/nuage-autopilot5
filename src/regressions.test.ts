@@ -4,7 +4,7 @@ import { judgeCi } from "./ci.ts";
 import { parseChecks } from "./github.ts";
 import { parseStartOptions } from "./main.ts";
 import { reviewFileName, runPipeline } from "./pipeline.ts";
-import { checks, pipelineHarness } from "./testing/helpers.ts";
+import { assignee, checks, pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
 /**
  * 実際に踏んだ欠陥の回帰テスト。
@@ -16,7 +16,10 @@ describe("agy が --model をプロンプトとして読んだ", () => {
   // 「-p took "--model" as its prompt」になった。
   test("どのエージェントも -p の直後がプロンプト", () => {
     for (const agent of ["claude", "agy", "copilot"] as const) {
-      expect(buildArgv({ agent, model: "m" }, "PROMPT").slice(-2)).toEqual(["-p", "PROMPT"]);
+      expect(buildArgv({ agent, model: "m", effort: "high" }, "PROMPT").slice(-2)).toEqual([
+        "-p",
+        "PROMPT",
+      ]);
     }
   });
 });
@@ -33,19 +36,35 @@ describe("--max-rounds に数字以外を渡すとレビューせずに done に
 describe("レビュー担当が 0 人でも done になった", () => {
   test("全員が失敗したら人間に戻す", async () => {
     const h = pipelineHarness({ commits: [true], failAgent: (_, k) => k === "review" });
-    const o = await runPipeline(
-      { impl: { agent: "claude" }, reviewers: [{ agent: "agy" }], maxRounds: 3, baseSha: "sha0" },
-      h.deps,
-    );
+    const o = await runPipeline(pipelineConfig(assignee("claude"), [assignee("agy")]), h.deps);
     expect(o.kind).toBe("needs-human");
   });
 });
 
 describe("同じエージェントのモデル違いのレビューが同じファイルに上書きされた", () => {
   test("ファイル名にモデルを含める", () => {
-    expect(reviewFileName({ agent: "agy", model: "a" }, 1)).not.toBe(
-      reviewFileName({ agent: "agy", model: "b" }, 1),
+    expect(reviewFileName(assignee("agy", "a"), 1)).not.toBe(
+      reviewFileName(assignee("agy", "b"), 1),
     );
+  });
+});
+
+describe("agy の既定モデルが利用上限に達し、レビュー担当が全員失敗した（pechka #74 の試運転）", () => {
+  // agy は他のモデルなら使えたのに、既定モデル 1 つで決め打ちしていたので人間に戻った。
+  test("並びの次のモデルでレビューを続ける", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      failAgent: (inv, k) => k === "review" && inv.model === "exhausted",
+    });
+    const o = await runPipeline(
+      pipelineConfig(assignee("claude"), [assignee("agy", "exhausted", "available")]),
+      h.deps,
+    );
+    expect(o).toEqual({ kind: "done" });
+    expect(h.calls.filter((c) => c.kind === "review").map((c) => c.inv.model)).toEqual([
+      "exhausted",
+      "available",
+    ]);
   });
 });
 
@@ -74,10 +93,7 @@ describe("push 直後の CI を読み違えた", () => {
         snapshots: [checks("fail"), () => ({ head: "sha1", checks: ["pass"] }), checks("fail")],
       },
     });
-    const o = await runPipeline(
-      { impl: { agent: "claude" }, reviewers: [{ agent: "agy" }], maxRounds: 3, baseSha: "sha0" },
-      h.deps,
-    );
+    const o = await runPipeline(pipelineConfig(assignee("claude"), [assignee("agy")]), h.deps);
     expect(o).toEqual({ kind: "needs-human", reason: "CI の失敗を直せなかった" });
   });
 });

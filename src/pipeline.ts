@@ -1,6 +1,7 @@
-import { type AgentSpec, formatAgentSpec } from "./agents.ts";
+import { formatInvocation, type Invocation } from "./agents.ts";
 import { type CiVerdict, judgeCi } from "./ci.ts";
 import type { GitHub } from "./github.ts";
+import type { Assignee, Assignment } from "./models.ts";
 import * as prompts from "./prompts.ts";
 
 /**
@@ -10,22 +11,25 @@ import * as prompts from "./prompts.ts";
  *
  * 順序と待ちはここが持ち、判断は LLM に任せる。
  * 成否はエージェントの自己申告ではなく、commit・PR・push が実際にできたかで判定する。
+ *
+ * 担当はモデルの並びを持ち、失敗したら次のモデルで試し直す（利用上限・認証切れ・モデルの廃止）。
+ * ただしコードを書き換える作業は、途中まで書き換えて落ちたなら試し直さない。別のモデルが続きを書くと混ざる。
  */
 
 /** CI の状態を読み直す間隔。 */
 export const CI_POLL_MS = 30_000;
 
-export interface Config {
-  impl: AgentSpec;
-  reviewers: AgentSpec[];
+export interface Config extends Assignment {
   maxRounds: number;
   baseSha: string;
 }
 
 export interface Deps {
   /** エージェントを 1 ターン実行する。outputName を渡すとその名前で標準出力を保存する。 */
-  runAgent(spec: AgentSpec, prompt: string, outputName?: string): Promise<boolean>;
+  runAgent(inv: Invocation, prompt: string, outputName?: string): Promise<boolean>;
   head(): Promise<string>;
+  /** 作業ツリーの状態（HEAD・未 commit の変更）を表す値。エージェントが何か変えたかを比べる。 */
+  fingerprint(): Promise<string>;
   /** PR と CI。--local のときは null。 */
   github: GitHub | null;
   clock: {
@@ -51,16 +55,53 @@ export function formatOutcome(o: Outcome): string {
 }
 
 /** レビュー結果のファイル名。同じエージェントをモデル違いで並べても衝突しない。 */
-export function reviewFileName(spec: AgentSpec, round: number): string {
-  const slug = formatAgentSpec(spec).replace(/[^A-Za-z0-9._-]+/g, "-");
+export function reviewFileName(reviewer: Assignee, round: number): string {
+  const slug = reviewer.name.replace(/[^A-Za-z0-9._-]+/g, "-");
   return `review-${round}-${slug}.md`;
+}
+
+/** 担当を、モデルの並びの前から順に試す。 */
+class Runner {
+  /** 失敗したモデル。利用上限は数時間〜数日戻らないので、この実行の間は後回しにする。 */
+  private readonly failed = new Set<string>();
+
+  constructor(private readonly d: Deps) {}
+
+  /**
+   * @param writes コードを書き換える作業か。書き換えたうえで失敗したら、次のモデルに切り替えない
+   */
+  async run(
+    who: Assignee,
+    prompt: string,
+    opts: { writes: boolean; output?: string },
+  ): Promise<boolean> {
+    const fresh = who.chain.filter((inv) => !this.failed.has(formatInvocation(inv)));
+    // 全部が一度失敗していても、あきらめる前にもう一度だけ並びどおりに試す。
+    const order = fresh.length > 0 ? fresh : who.chain;
+    for (const [i, inv] of order.entries()) {
+      const before = opts.writes ? await this.d.fingerprint() : "";
+      if (await this.d.runAgent(inv, prompt, opts.output)) return true;
+      this.failed.add(formatInvocation(inv));
+      const next = order[i + 1];
+      if (!next) break;
+      if (opts.writes && (await this.d.fingerprint()) !== before) {
+        this.d.state.log(
+          `${formatInvocation(inv)} が途中まで書き換えて失敗した。続きが混ざるので次のモデルには切り替えない`,
+        );
+        return false;
+      }
+      this.d.state.log(`${formatInvocation(inv)} が失敗した。${formatInvocation(next)} で試し直す`);
+    }
+    return false;
+  }
 }
 
 export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
   const mode: prompts.ShipMode = d.github ? "pr" : "local";
+  const runner = new Runner(d);
 
-  d.state.stage(`implementing (${formatAgentSpec(cfg.impl)})`);
-  if (!(await d.runAgent(cfg.impl, prompts.implement(mode)))) {
+  d.state.stage(`implementing (${cfg.implement.name})`);
+  if (!(await runner.run(cfg.implement, prompts.implement(mode), { writes: true }))) {
     return { kind: "failed", reason: "実装担当が異常終了した" };
   }
   if ((await d.head()) === cfg.baseSha) {
@@ -74,11 +115,12 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
     d.state.log(`PR #${pr}`);
   }
 
-  const outcome = await rounds(cfg, d, mode, pr);
+  const outcome = await rounds(cfg, d, runner, mode, pr);
   if (outcome.kind === "failed") return outcome;
 
   d.state.stage("summarizing");
-  if (!(await d.runAgent(cfg.impl, prompts.summarize(cfg.baseSha, pr)))) {
+  // 要約はコードを書き換えない（result.md と PR 本文だけ）ので、何度試し直してもよい。
+  if (!(await runner.run(cfg.summarize, prompts.summarize(cfg.baseSha, pr), { writes: false }))) {
     d.state.log("要約担当が異常終了した");
   }
   return outcome;
@@ -87,6 +129,7 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
 async function rounds(
   cfg: Config,
   d: Deps,
+  runner: Runner,
   mode: prompts.ShipMode,
   pr: number | null,
 ): Promise<Outcome> {
@@ -112,12 +155,16 @@ async function rounds(
       }
     }
 
-    d.state.stage(`reviewing (round ${round}: ${cfg.reviewers.map(formatAgentSpec).join(", ")})`);
+    d.state.stage(`reviewing (round ${round}: ${cfg.reviewers.map((r) => r.name).join(", ")})`);
     const results = await Promise.all(
       cfg.reviewers.map(async (rv) => {
         const name = reviewFileName(rv, round);
-        const ok = await d.runAgent(rv, prompts.review(cfg.baseSha), name);
-        if (!ok) d.state.log(`レビュー失敗: ${formatAgentSpec(rv)}`);
+        // レビュー担当はファイルを書き換えないので、失敗したら常に次のモデルで試し直す。
+        const ok = await runner.run(rv, prompts.review(cfg.baseSha), {
+          writes: false,
+          output: name,
+        });
+        if (!ok) d.state.log(`レビュー失敗: ${rv.name}`);
         return ok ? d.state.rel(name) : null;
       }),
     );
@@ -131,7 +178,9 @@ async function rounds(
 
     d.state.stage(`fixing (round ${round})`);
     const before = await d.head();
-    if (!(await d.runAgent(cfg.impl, prompts.fix({ mode, reviews, ciLog, inbox })))) {
+    if (
+      !(await runner.run(cfg.fix, prompts.fix({ mode, reviews, ciLog, inbox }), { writes: true }))
+    ) {
       return { kind: "failed", reason: "修正担当が異常終了した" };
     }
 

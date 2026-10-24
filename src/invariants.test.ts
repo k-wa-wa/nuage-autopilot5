@@ -36,6 +36,10 @@ describe("責務が 1 箇所に閉じている", () => {
     expect(filesContaining(/judgeCi\(/).sort()).toEqual(["ci.ts", "pipeline.ts"]);
   });
 
+  test("作業ごとの賢さ（段階）は models.ts だけが決める", () => {
+    expect(filesContaining(/"(standard|light)"/)).toEqual(["models.ts"]);
+  });
+
   test("流れ（pipeline.ts）は子プロセスもファイルも直接触らない（依存は Deps で受ける）", () => {
     const pipeline = sources.find((s) => s.name === "pipeline.ts")!.text;
     expect(pipeline).not.toMatch(/from "node:|from "\.\/exec\.ts"|from "\.\/state\.ts"|Bun\./);
@@ -71,6 +75,30 @@ describe("人間がいない前提で動く", () => {
       expect(argv).toContain("-p");
       expect(argv.some((a) => a === "--dangerously-skip-permissions" || a === "--yolo")).toBe(true);
     }
+  });
+});
+
+describe("モデル名は models.yaml だけに書く", () => {
+  // モデルは頻繁に変わる。コードや説明文に書くと、更新のたびに直す場所が散らばり、古い名前が残る。
+  const REAL_MODEL = /\b(gemini-\d|claude-(opus|sonnet|haiku|fable)|gpt-\d|gpt-oss)/;
+  const homeFiles = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? homeFiles(join(dir, e.name)) : [join(dir, e.name)],
+    );
+
+  test("コード（テストも含む）に実在のモデル名を書かない", () => {
+    const all = readdirSync(SRC, { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith(".ts") && f !== "invariants.test.ts");
+    const hits = all.filter((f) => REAL_MODEL.test(readFileSync(join(SRC, f), "utf8")));
+    expect(hits).toEqual([]);
+  });
+
+  test("home/（窓口が読むルールとスキル）に実在のモデル名を書かない", () => {
+    const hits = homeFiles(join(SRC, "..", "home")).filter((f) =>
+      REAL_MODEL.test(readFileSync(f, "utf8")),
+    );
+    expect(hits).toEqual([]);
   });
 });
 

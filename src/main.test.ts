@@ -10,9 +10,12 @@ const onPath =
 describe("parseStartOptions", () => {
   test("レビュー担当の既定は、実装担当以外で PATH にあるもの全部", async () => {
     const o = await parseStartOptions(base, onPath("claude", "agy", "copilot"));
-    expect(o.reviewers).toEqual([{ agent: "agy" }, { agent: "copilot" }]);
+    expect(o.reviewers).toEqual([
+      { agent: "agy", models: [] },
+      { agent: "copilot", models: [] },
+    ]);
     const o2 = await parseStartOptions({ ...base, impl: "agy" }, onPath("claude", "agy"));
-    expect(o2.reviewers).toEqual([{ agent: "claude" }]);
+    expect(o2.reviewers).toEqual([{ agent: "claude", models: [] }]);
   });
 
   test("レビュー担当がいなければ起動しない（レビュー無しで完了にしない）", async () => {
@@ -21,12 +24,12 @@ describe("parseStartOptions", () => {
 
   test("--reviewers を明示したら PATH を見ない", async () => {
     const o = await parseStartOptions(
-      { ...base, reviewers: "agy:gemini-3.8-flash-high,copilot" },
+      { ...base, reviewers: "agy:model-a/model-b,copilot" },
       onPath(),
     );
     expect(o.reviewers).toEqual([
-      { agent: "agy", model: "gemini-3.8-flash-high" },
-      { agent: "copilot" },
+      { agent: "agy", models: [{ model: "model-a" }, { model: "model-b" }] },
+      { agent: "copilot", models: [] },
     ]);
   });
 
@@ -48,6 +51,18 @@ describe("parseStartOptions", () => {
     await expect(parseStartOptions({ ...base, reviewers: "agy,codex" }, onPath())).rejects.toThrow(
       /unknown/,
     );
+  });
+
+  test("--level の既定は high で、段階の名前だけ受け付ける", async () => {
+    expect((await parseStartOptions(base, onPath("agy"))).level).toBe("high");
+    expect((await parseStartOptions({ ...base, level: "standard" }, onPath("agy"))).level).toBe(
+      "standard",
+    );
+    for (const bad of ["low", "High", ""]) {
+      await expect(parseStartOptions({ ...base, level: bad }, onPath("agy"))).rejects.toThrow(
+        /--level/,
+      );
+    }
   });
 
   test("--max-rounds は 1〜10 の整数だけ受け付ける", async () => {

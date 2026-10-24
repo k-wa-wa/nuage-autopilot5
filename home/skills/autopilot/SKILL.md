@@ -23,8 +23,10 @@ description: 人間と合意した仕事を、裏で最後まで自走させる�
    ```bash
    autopilot-run --impl claude
    ```
+   - 実装と修正の賢さは `--level` で選ぶ。既定は `high`。文言・設定値・依存の更新のような小さく機械的な仕事は `--level standard` にする。迷ったら既定のままにする。
    - push・PR を伴わない試運転は `--local` を付ける。
-   - レビュー担当やモデルを指定されたら `--reviewers agy:gemini-3.8-flash-high,copilot` のように渡す。
+   - モデルは段階ごとにホストの models.yaml で決まっている（`RUN models` で確認できる）。自分で選ばない。
+   - レビュー担当やモデルを人間に指定されたときだけ、`--reviewers agy,copilot` や `--impl claude:MODEL` のように渡す。
 3. 「任せた。終わったら呼ぶ」とだけ返してターンを終える。
 
 ## 3. 終わって起こされたら

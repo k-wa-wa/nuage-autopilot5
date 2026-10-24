@@ -258,3 +258,107 @@ describe("PR モード", () => {
     TIMEOUT,
   );
 });
+
+describe("models.yaml", () => {
+  const MODELS = `
+claude:
+  high: [c1@high, c2@high]
+  light: [c-small@low]
+agy:
+  high: [a1, a2]
+`;
+  const writeModels = (text = MODELS) => writeFileSync(join(env.home, "models.yaml"), text);
+  const invocations = (kind: string) =>
+    env.world
+      .calls()
+      .filter((c) => c.kind === kind)
+      .map((c) => `${c.name} ${c.args.join(" ")}`);
+
+  test(
+    "作業ごとの段階の並びでモデルと effort を渡し、利用上限のモデルは次へ切り替える",
+    async () => {
+      setup();
+      writeModels();
+      env.world.scripts({
+        claude: { implement: ["commit"], fix: [], summarize: ["result"] },
+        agy: { review: ["fail-if-model:a1", "say:指摘なし"] },
+      });
+      const r = await main(["--local"]);
+      expect(r.code).toBe(0);
+      expect(status()).toBe("done");
+      expect(invocations("implement")).toEqual([
+        "claude --model c1 --effort high --dangerously-skip-permissions -p",
+      ]);
+      expect(invocations("review")).toEqual([
+        "agy --model a1 --dangerously-skip-permissions -p",
+        "agy --model a2 --dangerously-skip-permissions -p",
+      ]);
+      expect(invocations("summarize")).toEqual([
+        "claude --model c-small --effort low --dangerously-skip-permissions -p",
+      ]);
+      expect(read("review-1-agy.md")).toBe("指摘なし\n");
+      expect(read("run.log")).toContain("agy:a1 が失敗した。agy:a2 で試し直す");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "実装担当が何も変えずに落ちたら次のモデルで実装し、書き換えてから落ちたら切り替えない",
+    async () => {
+      setup();
+      writeModels();
+      env.world.scripts({
+        claude: { implement: ["fail-if-model:c1", "commit"], fix: [], summarize: ["result"] },
+        agy: { review: ["say:指摘なし"] },
+      });
+      expect((await main(["--local"])).code).toBe(0);
+      expect(invocations("implement").map((l) => l.split(" ")[2])).toEqual(["c1", "c2"]);
+      env.repo.cleanup();
+
+      setup();
+      writeModels();
+      env.world.scripts({
+        claude: { implement: ["commit", "fail-if-model:c1"] },
+        agy: { review: ["say:指摘なし"] },
+      });
+      expect((await main(["--local"])).code).toBe(1);
+      expect(status()).toBe("failed: 実装担当が異常終了した");
+      expect(invocations("implement").map((l) => l.split(" ")[2])).toEqual(["c1"]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "書き間違えた models.yaml では起動しない",
+    async () => {
+      setup();
+      writeModels("claude:\n  hgih: [c1]\n");
+      const r = await main(["--local"]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("知らない段階: hgih");
+      expect(env.world.calls()).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "models は並びを表示し、--file で検査できる（worktree の外でも動く）",
+    async () => {
+      setup();
+      writeModels();
+      const shown = await main(["models"]);
+      expect(shown.code).toBe(0);
+      expect(shown.stdout).toContain("a1 → a2");
+
+      const opts = { cwd: env.home, world: env.world, home: env.home };
+      const bad = join(env.home, "bad.yaml");
+      writeFileSync(bad, "codex:\n  high: [x]\n");
+      const checked = await runMain(["models", "--file", bad], opts);
+      expect(checked.code).toBe(2);
+      expect(checked.stderr).toContain("知らないエージェント: codex");
+      const missing = await runMain(["models", "--file", join(env.home, "none.yaml")], opts);
+      expect(missing.code).toBe(2);
+    },
+    TIMEOUT,
+  );
+});

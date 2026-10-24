@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import type { CheckBucket, PrSnapshot } from "./ci.ts";
 import { capture } from "./exec.ts";
@@ -114,6 +115,21 @@ export async function currentBranch(cwd: string): Promise<string> {
 
 export async function headSha(cwd: string): Promise<string> {
   return (await capture(["git", "rev-parse", "HEAD"], cwd)).stdout;
+}
+
+/**
+ * 作業ツリーの状態を表す値。HEAD・未 commit の変更・未追跡のファイルのどれかが変われば変わる。
+ * .autopilot/ は exclude しているので含まない。
+ */
+export async function worktreeFingerprint(cwd: string): Promise<string> {
+  const parts = await Promise.all([
+    capture(["git", "rev-parse", "HEAD"], cwd),
+    capture(["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd),
+    capture(["git", "diff", "HEAD"], cwd),
+  ]);
+  const hash = createHash("sha256");
+  for (const p of parts) hash.update(`${p.stdout}\0`);
+  return hash.digest("hex");
 }
 
 /** git の共通ディレクトリ（worktree でも本体の .git を指す）。 */
