@@ -42,6 +42,8 @@ export function kindOf(prompt: string): PromptKind {
 export interface HarnessOptions {
   /** 実装・修正の各ターンで commit するか。順に消費する。 */
   commits: boolean[];
+  /** 始める前に基点（sha0）から進んでいる commit の数。既存の PR の続きを表す。 */
+  startHead?: number;
   github?: {
     pr: number | null;
     /** CI の状態を読むたびに返すもの。順に消費し、最後の 1 つを繰り返す。 */
@@ -55,7 +57,7 @@ export interface HarnessOptions {
 
 /** エージェント・git・GitHub・時計をすべて偽物にした pipeline の依存。 */
 export function pipelineHarness(opts: HarnessOptions) {
-  let head = 0;
+  let head = opts.startHead ?? 0;
   let dirty = 0;
   let now = 0;
   const calls: { inv: Invocation; kind: PromptKind; prompt: string; output?: string }[] = [];

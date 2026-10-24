@@ -101,10 +101,12 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
   const runner = new Runner(d);
 
   d.state.stage(`implementing (${cfg.implement.name})`);
+  // 基点ではなく実装の直前と比べる。既存の PR の続きでは、もとから基点より進んでいる。
+  const beforeImplement = await d.head();
   if (!(await runner.run(cfg.implement, prompts.implement(mode), { writes: true }))) {
     return { kind: "failed", reason: "実装担当が異常終了した" };
   }
-  if ((await d.head()) === cfg.baseSha) {
+  if ((await d.head()) === beforeImplement) {
     return { kind: "failed", reason: "何も commit されなかった" };
   }
 

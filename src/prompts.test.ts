@@ -45,6 +45,12 @@ describe("プロンプト", () => {
     expect(all.review).toContain("指摘なし");
   });
 
+  test("レビューは指摘が無くても、何を確かめたかを書かせる（浅いレビューを見分ける）", () => {
+    expect(all.review).toContain("指摘の有無にかかわらず");
+    expect(all.review).toContain("確かめたこと:");
+    expect(all.review).not.toContain("とだけ出力する");
+  });
+
   test("修正には、渡されたものだけを並べる（優先度つき）", () => {
     const p = prompts.fix({
       mode: "pr",

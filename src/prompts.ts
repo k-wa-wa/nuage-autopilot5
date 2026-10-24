@@ -24,7 +24,8 @@ export function implement(mode: ShipMode): string {
 export function review(baseSha: string): string {
   return `あなたはコードレビュアーである。ファイルは一切変更しない。
 \`git diff ${baseSha}...HEAD\` の変更を、.autopilot/brief.md の仕様に照らしてレビューする。
-指摘は重要度（must / should / nit）を付けて箇条書きで出力する。問題が無ければ「指摘なし」とだけ出力する。`;
+指摘は重要度（must / should / nit）を付けて箇条書きで出力する。問題が無ければ 1 行目を「指摘なし」とする。
+指摘の有無にかかわらず、最後に「確かめたこと:」として、仕様の各項目・テスト・影響範囲のどれをどう確かめたかを 2〜3 行で書く。`;
 }
 
 export interface FixInput {

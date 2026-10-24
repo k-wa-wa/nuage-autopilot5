@@ -4,6 +4,7 @@ import { judgeCi } from "./ci.ts";
 import { parseChecks } from "./github.ts";
 import { parseStartOptions } from "./main.ts";
 import { reviewFileName, runPipeline } from "./pipeline.ts";
+import * as prompts from "./prompts.ts";
 import { assignee, checks, pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
 /**
@@ -46,6 +47,24 @@ describe("同じエージェントのモデル違いのレビューが同じフ�
     expect(reviewFileName(assignee("agy", "a"), 1)).not.toBe(
       reviewFileName(assignee("agy", "b"), 1),
     );
+  });
+});
+
+describe("レビューが毎回「指摘なし」の 1 行だけで、確かめた範囲が分からなかった（pechka #75 の試運転）", () => {
+  // プロンプトが「問題が無ければ『指摘なし』とだけ出力する」だったので、浅いレビューと見分けられなかった。
+  test("指摘が無くても、確かめたことを書かせる", () => {
+    const p = prompts.review("abc");
+    expect(p).toContain("確かめたこと:");
+    expect(p).not.toContain("とだけ出力する");
+  });
+});
+
+describe("既存の PR の続きでは、実装担当が何も commit しなくても成功になった（pechka #75 の試運転）", () => {
+  // 基点（既定ブランチ）と比べていたので、もとから進んでいるブランチでは常に「commit あり」に見えた。
+  test("実装の直前の HEAD と比べる", async () => {
+    const h = pipelineHarness({ commits: [false], startHead: 1, github: { pr: 75 } });
+    const o = await runPipeline(pipelineConfig(assignee("claude"), [assignee("agy")]), h.deps);
+    expect(o).toEqual({ kind: "failed", reason: "何も commit されなかった" });
   });
 });
 

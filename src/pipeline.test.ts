@@ -60,6 +60,19 @@ describe("runPipeline: 成否は成果物で判定する", () => {
     });
   });
 
+  test("既存の PR の続きでも、実装で commit が増えなければ失敗にする", async () => {
+    const h = pipelineHarness({ commits: [false], startHead: 2, github: { pr: 7 } });
+    expect(await runPipeline(cfg, h.deps)).toEqual({
+      kind: "failed",
+      reason: "何も commit されなかった",
+    });
+  });
+
+  test("既存の PR の続きで commit が増えれば先へ進む", async () => {
+    const h = pipelineHarness({ commits: [true, false], startHead: 2, github: { pr: 7 } });
+    expect(await runPipeline(cfg, h.deps)).toEqual({ kind: "done" });
+  });
+
   test("PR モードでも commit が無ければ失敗にする", async () => {
     const h = pipelineHarness({ commits: [false], github: { pr: 7 } });
     expect((await runPipeline(cfg, h.deps)).kind).toBe("failed");
