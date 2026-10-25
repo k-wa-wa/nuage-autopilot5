@@ -9,6 +9,8 @@ import * as prompts from "./prompts.ts";
  *
  *   実装 → PR → [CI 待ち → レビュー → 修正] を上限回数まで → 要約
  *
+ * --from review では実装を飛ばし、今のブランチの PR（--local ならローカルの commit）のレビューから始める。
+ *
  * 順序と待ちはここが持ち、判断は LLM に任せる。
  * 成否はエージェントの自己申告ではなく、commit・PR・push が実際にできたかで判定する。
  *
@@ -19,9 +21,14 @@ import * as prompts from "./prompts.ts";
 /** CI の状態を読み直す間隔。 */
 export const CI_POLL_MS = 30_000;
 
+/** どこから始めるか。review は実装が済んでいて、レビューだけ回したいとき。 */
+export const START_POINTS = ["implement", "review"] as const;
+export type StartPoint = (typeof START_POINTS)[number];
+
 export interface Config extends Assignment {
   maxRounds: number;
   baseSha: string;
+  from: StartPoint;
 }
 
 export interface Deps {
@@ -100,20 +107,27 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
   const mode: prompts.ShipMode = d.github ? "pr" : "local";
   const runner = new Runner(d);
 
-  d.state.stage(`implementing (${cfg.implement.name})`);
-  // 基点ではなく実装の直前と比べる。既存の PR の続きでは、もとから基点より進んでいる。
-  const beforeImplement = await d.head();
-  if (!(await runner.run(cfg.implement, prompts.implement(mode), { writes: true }))) {
-    return { kind: "failed", reason: "実装担当が異常終了した" };
-  }
-  if ((await d.head()) === beforeImplement) {
-    return { kind: "failed", reason: "何も commit されなかった" };
+  if (cfg.from === "implement") {
+    d.state.stage(`implementing (${cfg.implement.name})`);
+    // 基点ではなく実装の直前と比べる。既存の PR の続きでは、もとから基点より進んでいる。
+    const beforeImplement = await d.head();
+    if (!(await runner.run(cfg.implement, prompts.implement(mode), { writes: true }))) {
+      return { kind: "failed", reason: "実装担当が異常終了した" };
+    }
+    if ((await d.head()) === beforeImplement) {
+      return { kind: "failed", reason: "何も commit されなかった" };
+    }
   }
 
   let pr: number | null = null;
   if (d.github) {
     pr = await d.github.prNumber();
-    if (pr === null) return { kind: "failed", reason: "PR が作られなかった" };
+    if (pr === null) {
+      return {
+        kind: "failed",
+        reason: cfg.from === "implement" ? "PR が作られなかった" : "PR が無い",
+      };
+    }
     d.state.log(`PR #${pr}`);
   }
 

@@ -290,6 +290,38 @@ describe("runPipeline: モデルの切り替え", () => {
   });
 });
 
+describe("runPipeline: --from review", () => {
+  const fromReview = pipelineConfig(assignee("claude"), [assignee("agy")], { from: "review" });
+
+  test("実装を呼ばず、今のブランチの PR の CI を待ってからレビューする", async () => {
+    const h = pipelineHarness({ commits: [false], startHead: 2, github: { pr: 56 } });
+    expect(await runPipeline(fromReview, h.deps)).toEqual({ kind: "done" });
+    expect(h.calls.map((c) => c.kind)).toEqual(["review", "fix", "summarize"]);
+    expect(h.stages.some((s) => s.startsWith("implementing"))).toBe(false);
+    expect(h.stages[0]).toBe("waiting CI (round 1)");
+    expect(h.logs).toContain("PR #56");
+  });
+
+  test("PR が無ければ、何も呼ばずに失敗にする", async () => {
+    const h = pipelineHarness({ commits: [], startHead: 2, github: { pr: null } });
+    expect(await runPipeline(fromReview, h.deps)).toEqual({ kind: "failed", reason: "PR が無い" });
+    expect(h.calls).toEqual([]);
+  });
+
+  test("--local 相当（GitHub 無し）では、PR を使わずにローカルの commit をレビューする", async () => {
+    const h = pipelineHarness({ commits: [false], startHead: 2 });
+    expect(await runPipeline(fromReview, h.deps)).toEqual({ kind: "done" });
+    expect(h.calls.map((c) => c.kind)).toEqual(["review", "fix", "summarize"]);
+    expect(h.calls[0]?.prompt).toContain("git diff sha0...HEAD");
+  });
+
+  test("修正があれば、実装からのときと同じく次のラウンドでレビューし直す", async () => {
+    const h = pipelineHarness({ commits: [true, false], startHead: 2, github: { pr: 56 } });
+    expect(await runPipeline(fromReview, h.deps)).toEqual({ kind: "done" });
+    expect(h.stages.filter((s) => s.startsWith("reviewing"))).toHaveLength(2);
+  });
+});
+
 describe("reviewFileName", () => {
   test("同じエージェントをモデル違いで並べても衝突しない", () => {
     const a = reviewFileName(assignee("agy", "model-a"), 1);

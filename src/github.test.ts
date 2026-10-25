@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { currentBranch, defaultBranch, parseChecks, resolveBaseSha } from "./github.ts";
-import { git, tempRepo } from "./testing/helpers.ts";
+import {
+  currentBranch,
+  defaultBranch,
+  parseChecks,
+  parseFailedRunId,
+  parsePrNumber,
+  resolveBaseSha,
+} from "./github.ts";
+import { GH_NO_AUTH, GH_NO_PR, git, tempRepo } from "./testing/helpers.ts";
 
 describe("parseChecks", () => {
   test("gh pr checks --json bucket の結果を読む", () => {
@@ -38,6 +45,40 @@ describe("parseChecks", () => {
   });
 });
 
+describe("parsePrNumber", () => {
+  test("成功なら番号を返す", () => {
+    expect(parsePrNumber({ code: 0, stdout: "56", stderr: "" })).toBe(56);
+  });
+
+  test("PR が無いときだけ null を返す", () => {
+    expect(parsePrNumber({ code: 1, stdout: "", stderr: GH_NO_PR })).toBeNull();
+  });
+
+  test("それ以外の失敗は gh の stderr を付けて例外にする", () => {
+    expect(() => parsePrNumber({ code: 4, stdout: "", stderr: GH_NO_AUTH })).toThrow(
+      /gh auth login/,
+    );
+    expect(() => parsePrNumber({ code: 1, stdout: "", stderr: "HTTP 502" })).toThrow(/HTTP 502/);
+  });
+
+  test("成功でも番号として読めなければ例外にする", () => {
+    expect(() => parsePrNumber({ code: 0, stdout: "", stderr: "" })).toThrow(/gh pr view/);
+  });
+});
+
+describe("parseFailedRunId", () => {
+  test("該当する実行があれば ID、無ければ null", () => {
+    expect(parseFailedRunId({ code: 0, stdout: "123", stderr: "" })).toBe("123");
+    expect(parseFailedRunId({ code: 0, stdout: "", stderr: "" })).toBeNull();
+  });
+
+  test("gh の失敗は「見つからなかった」にせず、stderr を付けて例外にする", () => {
+    expect(() => parseFailedRunId({ code: 4, stdout: "", stderr: GH_NO_AUTH })).toThrow(
+      /gh run list.*gh auth login/s,
+    );
+  });
+});
+
 describe("git の読み取り", () => {
   let repo: ReturnType<typeof tempRepo>;
   afterEach(() => repo.cleanup());
@@ -46,6 +87,21 @@ describe("git の読み取り", () => {
     repo = tempRepo();
     expect(await defaultBranch(repo.work, true)).toBe("main");
     expect(await currentBranch(repo.work)).toBe("feat/x");
+  });
+
+  test("PR モードで gh repo view が失敗したら、origin/HEAD に落とさず stderr を付けて例外にする", async () => {
+    repo = tempRepo();
+    const bin = join(repo.root, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "gh"), `#!/bin/sh\ncat >&2 <<'EOF'\n${GH_NO_AUTH}\nEOF\nexit 4\n`);
+    chmodSync(join(bin, "gh"), 0o755);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    try {
+      await expect(defaultBranch(repo.work, false)).rejects.toThrow(/exit 4.*gh auth login/s);
+    } finally {
+      process.env.PATH = path;
+    }
   });
 
   test("差分の起点は既定ブランチとの分岐点（作業ブランチの commit を含まない）", async () => {
