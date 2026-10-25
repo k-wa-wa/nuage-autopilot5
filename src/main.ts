@@ -39,10 +39,10 @@ import {
   MODELS_PATH,
   type ModelTable,
 } from "./models.ts";
-import { formatOutcome, runPipeline } from "./pipeline.ts";
+import { formatOutcome, runPipeline, START_POINTS, type StartPoint } from "./pipeline.ts";
 import { STATE_DIR, State } from "./state.ts";
 
-const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--level LEVEL] [--max-rounds N] [--local]
+const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--level LEVEL] [--max-rounds N] [--local] [--from FROM]
        autopilot-run status
        autopilot-run stop
        autopilot-run models [--file PATH]
@@ -53,6 +53,8 @@ const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--
   --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューは high、要約は light で固定
   --max-rounds 修正ループの上限（1〜10、既定: 3）
   --local      push・PR・CI を行わず、ローカルの差分だけで回す（試運転用）
+  --from       どこから始めるか。${START_POINTS.join(" | ")}（既定: implement）。
+               review は実装を飛ばし、今のブランチの PR（--local ならローカルの commit）のレビューから始める
   models       段階ごとのモデルの並びを表示する。--file で別のファイルを検査する
 
   models.yaml  $AUTOPILOT_MODELS（既定: ${MODELS_PATH}）。無ければ各 CLI の既定モデルで動く`;
@@ -77,6 +79,7 @@ export interface StartOptions {
   level: Level;
   maxRounds: number;
   local: boolean;
+  from: StartPoint;
 }
 
 /** 引数を読み、起動してよいかを確かめる。PATH の探索は findAgent に任せる。 */
@@ -87,6 +90,7 @@ export async function parseStartOptions(
     level?: string;
     "max-rounds": string;
     local: boolean;
+    from?: string;
   },
   findAgent: (name: string) => Promise<boolean>,
 ): Promise<StartOptions> {
@@ -109,6 +113,11 @@ export async function parseStartOptions(
     throw new UsageError(`--max-rounds は 1〜10 の整数: ${values["max-rounds"]}`);
   }
 
+  const from = (values.from ?? "implement") as StartPoint;
+  if (!START_POINTS.includes(from)) {
+    throw new UsageError(`--from は ${START_POINTS.join(" / ")} のどれか: ${values.from}`);
+  }
+
   let reviewers: AgentSpec[];
   if (explicit) {
     const names = explicit.map(formatAgentSpec);
@@ -127,7 +136,7 @@ export async function parseStartOptions(
       `レビュー担当がいない。--reviewers で指定するか、${impl.agent} 以外のエージェント CLI を PATH に入れる`,
     );
   }
-  return { impl, reviewers, level, maxRounds, local: values.local };
+  return { impl, reviewers, level, maxRounds, local: values.local, from };
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -141,6 +150,7 @@ async function main(argv: string[]): Promise<number> {
       "max-rounds": { type: "string", default: "3" },
       file: { type: "string" },
       local: { type: "boolean", default: false },
+      from: { type: "string", default: "implement" },
       help: { type: "boolean", short: "h", default: false },
     },
   });
@@ -204,7 +214,13 @@ async function main(argv: string[]): Promise<number> {
   // 既定ブランチへの直接 commit は、ブランチ保護の有無に関わらず起こさせない。
   const branch = await currentBranch(root);
   if (!branch) throw new UsageError("ブランチに乗っていない（detached HEAD）");
-  const base = await defaultBranch(root, opts.local);
+  // PR モードでは gh の認証とリポジトリへのアクセスもここで確かめ、だめなら実装担当を起動する前に止める。
+  let base: string | null;
+  try {
+    base = await defaultBranch(root, opts.local);
+  } catch (e) {
+    throw new UsageError(`GitHub を読めない: ${e instanceof Error ? e.message : String(e)}`);
+  }
   if (branch === base) {
     throw new UsageError(`既定ブランチ (${base}) の上では動かさない。作業ブランチを切ること`);
   }
@@ -251,7 +267,7 @@ async function start(
   const logPath = state.file("run.log");
   const baseSha = await resolveBaseSha(root, base);
   state.log(
-    `start impl=${formatAgentSpec(opts.impl)} level=${opts.level} reviewers=${opts.reviewers.map(formatAgentSpec).join(",")} base=${baseSha.slice(0, 8)}${opts.local ? " (local)" : ""}`,
+    `start impl=${formatAgentSpec(opts.impl)} level=${opts.level} reviewers=${opts.reviewers.map(formatAgentSpec).join(",")} base=${baseSha.slice(0, 8)} from=${opts.from}${opts.local ? " (local)" : ""}`,
   );
   if (!models) state.log(`${modelsPath()} が無いので、各 CLI の既定モデルで動く`);
   const roles = assignRoles(opts, models ?? {});
@@ -265,7 +281,7 @@ async function start(
   );
 
   return runPipeline(
-    { ...roles, maxRounds: opts.maxRounds, baseSha },
+    { ...roles, maxRounds: opts.maxRounds, baseSha, from: opts.from },
     {
       async runAgent(inv, prompt, outputName) {
         state.log(`-> ${formatInvocation(inv)}`);

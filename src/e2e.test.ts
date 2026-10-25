@@ -244,6 +244,19 @@ describe("PR モード", () => {
   );
 
   test(
+    "gh の認証が無ければ、実装担当を起動する前に gh の出力を付けて拒否する",
+    async () => {
+      setup();
+      env.world.scripts({ claude: { implement: ["commit"] }, agy: { review: ["say:指摘なし"] } });
+      const r = await main([], { FAKE_GH_NO_AUTH: "1" });
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("gh auth login");
+      expect(env.world.calls()).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
     "PR が作られなければ failed",
     async () => {
       setup();
@@ -254,6 +267,90 @@ describe("PR モード", () => {
       const r = await main([]);
       expect(r.code).toBe(1);
       expect(status()).toBe("failed: PR が作られなかった");
+    },
+    TIMEOUT,
+  );
+});
+
+describe("--from review", () => {
+  /** 実装は済んでいて、push 済みの commit と PR がある状態。 */
+  const implemented = (pr: number | null) => {
+    writeFileSync(join(env.repo.work, "done.txt"), "implemented\n");
+    git(env.repo.work, "add", "done.txt");
+    git(env.repo.work, "commit", "-qm", "implemented");
+    git(env.repo.work, "push", "-q", "origin", "HEAD");
+    if (pr !== null) env.world.openPr(pr);
+  };
+
+  test(
+    "既存の PR に対して、実装を飛ばして CI 待ち → レビュー → 要約を行う",
+    async () => {
+      setup();
+      implemented(56);
+      env.world.scripts({
+        claude: { implement: ["commit"], fix: [], summarize: ["result"] },
+        agy: { review: ["say:指摘なし"] },
+      });
+      env.world.checks([["pass"]]);
+      const r = await main(["--from", "review"]);
+      expect(r.stderr).toBe("");
+      expect(r.code).toBe(0);
+      expect(status()).toBe("done");
+      expect(read("run.log")).toContain("PR #56");
+      expect(env.world.ghLog()).toContain("pr checks 56 --json bucket");
+      expect(env.world.calls().map((c) => `${c.name}:${c.kind}`)).toEqual([
+        "agy:review",
+        "claude:fix",
+        "claude:summarize",
+      ]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "PR が無ければ、誰も呼ばずに failed で終わる",
+    async () => {
+      setup();
+      implemented(null);
+      env.world.scripts({ claude: { implement: ["commit"] }, agy: { review: ["say:指摘なし"] } });
+      const r = await main(["--from", "review"]);
+      expect(r.code).toBe(1);
+      expect(status()).toBe("failed: PR が無い");
+      expect(env.world.calls()).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "--local と併せると、PR を使わずにローカルの commit をレビューする",
+    async () => {
+      setup();
+      implemented(null);
+      env.world.scripts({
+        claude: { implement: ["commit"], fix: [], summarize: ["result"] },
+        agy: { review: ["say:指摘なし"] },
+      });
+      const r = await main(["--from", "review", "--local"]);
+      expect(r.code).toBe(0);
+      expect(status()).toBe("done");
+      expect(env.world.calls().map((c) => `${c.name}:${c.kind}`)).toEqual([
+        "agy:review",
+        "claude:fix",
+        "claude:summarize",
+      ]);
+      expect(env.world.ghLog()).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "知らない値では起動しない",
+    async () => {
+      setup();
+      const r = await main(["--from", "fix"]);
+      expect(r.code).toBe(2);
+      expect(r.stderr).toContain("--from");
+      expect(env.world.calls()).toEqual([]);
     },
     TIMEOUT,
   );

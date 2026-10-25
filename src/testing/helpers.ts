@@ -36,6 +36,13 @@ export function kindOf(prompt: string): PromptKind {
   throw new Error(`種類の分からないプロンプト: ${prompt.slice(0, 80)}`);
 }
 
+/** gh 2.101 の実物の stderr。PR が無いとき（exit 1）。 */
+export const GH_NO_PR = 'no pull requests found for branch "bot-wa-wa/fix-resume-review"';
+
+/** gh 2.101 の実物の stderr。認証が無いとき（exit 4。gh pr view・gh repo view とも）。 */
+export const GH_NO_AUTH = `To get started with GitHub CLI, please run:  gh auth login
+Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.`;
+
 // ---------------------------------------------------------------------------
 // pipeline の単体テスト用
 
@@ -137,6 +144,7 @@ export function pipelineConfig(
     reviewers,
     maxRounds: 3,
     baseSha: "sha0",
+    from: "implement",
     ...extra,
   };
 }
@@ -225,6 +233,8 @@ export interface FakeWorld {
   scripts(s: AgentScripts): void;
   /** gh pr checks が返す CI の状態。呼ばれるたびに順に使い、最後を繰り返す。省略時は CI 無し。 */
   checks(seq: CheckBucket[][]): void;
+  /** 今のブランチに PR #n がすでにある状態にする（既存の PR の続き）。 */
+  openPr(n: number): void;
   /** 偽の CLI が呼ばれた記録。 */
   calls(): { name: string; kind: PromptKind; prompt: string; args: string[]; orca: string[] }[];
   ghLog(): string[];
@@ -288,10 +298,12 @@ const fail = (s) => { console.error(s); process.exit(1); };
 const prFile = join(state, "pr");
 const git = (...a) => Bun.spawnSync(["git", ...a]).stdout.toString().trim();
 
+// 認証の無いシェルから起動したとき。gh 2.101 の実物の出力。
+if (process.env.FAKE_GH_NO_AUTH) { console.error(GH_NO_AUTH); process.exit(4); }
 if (has("repo", "view")) out("main");
 if (has("pr", "create")) { writeFileSync(prFile, "7"); out("https://github.com/o/r/pull/7"); }
 if (has("pr", "edit")) out("");
-if (has("pr", "view", "number")) existsSync(prFile) ? out(readFileSync(prFile, "utf8")) : fail("no pull requests found");
+if (has("pr", "view", "number")) existsSync(prFile) ? out(readFileSync(prFile, "utf8")) : fail('no pull requests found for branch "' + git("branch", "--show-current") + '"');
 if (has("pr", "view", "headRefOid")) {
   const ref = "refs/heads/" + git("branch", "--show-current");
   out(git("ls-remote", "origin", ref).split("\\t")[0]);
@@ -326,7 +338,7 @@ export function fakeWorld(root: string, agents: readonly string[] = ["claude", "
     chmodSync(path, 0o755);
   };
   for (const a of agents) write(a, `const NAME = ${JSON.stringify(a)};\n${FAKE_AGENT}`);
-  write("gh", FAKE_GH);
+  write("gh", `const GH_NO_AUTH = ${JSON.stringify(GH_NO_AUTH)};\n${FAKE_GH}`);
   const realGit = Bun.which("git");
   if (!realGit) throw new Error("git が無い");
   symlinkSync(realGit, join(bin, "git"));
@@ -340,6 +352,7 @@ export function fakeWorld(root: string, agents: readonly string[] = ["claude", "
     stateDir,
     scripts: (s) => writeFileSync(join(stateDir, "scripts.json"), JSON.stringify(s)),
     checks: (seq) => writeFileSync(join(stateDir, "checks.json"), JSON.stringify(seq)),
+    openPr: (n) => writeFileSync(join(stateDir, "pr"), String(n)),
     calls: () => readLines("calls.jsonl").map((l) => JSON.parse(l)),
     ghLog: () => readLines("gh.log"),
   };

@@ -10,11 +10,11 @@ import { capture } from "./exec.ts";
 
 /** PR と CI の読み取り。--local では使わない。 */
 export interface GitHub {
-  /** 現在のブランチの PR 番号。無ければ null。 */
+  /** 現在のブランチの PR 番号。無ければ null。gh が失敗したら例外（「PR が無い」と区別する）。 */
   prNumber(): Promise<number | null>;
   /** PR の HEAD と CI の状態。読めなければ例外。 */
   snapshot(pr: number): Promise<PrSnapshot>;
-  /** そのコミットで失敗した CI のログ末尾を保存する。 */
+  /** そのコミットで失敗した CI のログ末尾を保存する。gh が失敗したら例外。 */
   saveFailedLog(sha: string, path: string): Promise<void>;
 }
 
@@ -38,12 +38,42 @@ export function parseChecks(r: { code: number; stdout: string; stderr: string })
   throw new Error(`gh pr checks が失敗した (exit ${r.code}): ${r.stderr || r.stdout}`);
 }
 
+type GhResult = { code: number; stdout: string; stderr: string };
+
+function ghFailed(what: string, r: GhResult): Error {
+  return new Error(`${what} が失敗した (exit ${r.code}): ${r.stderr || r.stdout}`);
+}
+
+/**
+ * `gh pr view --json number` の結果を読む。
+ * PR が無いときも認証が無いときも gh は失敗で終わるので、stderr で見分ける。
+ * 「PR が無い」以外の失敗を null にすると、認証エラーが「PR が作られなかった」に化ける。
+ */
+export function parsePrNumber(r: GhResult): number | null {
+  if (r.code === 0) {
+    const n = Number(r.stdout);
+    if (Number.isInteger(n) && n > 0) return n;
+  } else if (/no pull requests found/i.test(r.stderr)) {
+    return null;
+  }
+  throw ghFailed("gh pr view", r);
+}
+
+/**
+ * `gh run list` で選んだ、失敗した実行の ID を読む。該当する実行が無ければ null。
+ * gh そのものの失敗は「見つからなかった」にしない。
+ */
+export function parseFailedRunId(r: GhResult): string | null {
+  if (r.code !== 0) throw ghFailed("gh run list", r);
+  return r.stdout || null;
+}
+
 export function realGitHub(cwd: string): GitHub {
   return {
     async prNumber() {
-      const r = await capture(["gh", "pr", "view", "--json", "number", "-q", ".number"], cwd);
-      const n = Number(r.stdout);
-      return r.code === 0 && n > 0 ? n : null;
+      return parsePrNumber(
+        await capture(["gh", "pr", "view", "--json", "number", "-q", ".number"], cwd),
+      );
     },
 
     async snapshot(pr) {
@@ -73,22 +103,31 @@ export function realGitHub(cwd: string): GitHub {
         ],
         cwd,
       );
-      const log = list.stdout
-        ? (await capture(["gh", "run", "view", list.stdout, "--log-failed"], cwd)).stdout
-        : `コミット ${sha} の失敗した CI の実行が見つからなかった。gh pr checks で確認すること。`;
+      const id = parseFailedRunId(list);
+      let log = `コミット ${sha} の失敗した CI の実行が見つからなかった。gh pr checks で確認すること。`;
+      if (id) {
+        const view = await capture(["gh", "run", "view", id, "--log-failed"], cwd);
+        if (view.code !== 0) throw ghFailed("gh run view", view);
+        log = view.stdout;
+      }
       writeFileSync(path, log.split("\n").slice(-200).join("\n"));
     },
   };
 }
 
-/** 既定ブランチの名前。PR モードでは GitHub に、--local では origin/HEAD に聞く。 */
+/**
+ * 既定ブランチの名前。PR モードでは GitHub に、--local では origin/HEAD に聞く。
+ * PR モードでは、この呼び出しで gh の認証とリポジトリへのアクセスも確かめる。
+ * 失敗したら origin/HEAD に落とさず例外にする（PR を読めないまま実装を始めない）。
+ */
 export async function defaultBranch(cwd: string, local: boolean): Promise<string | null> {
   if (!local) {
     const r = await capture(
       ["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"],
       cwd,
     );
-    if (r.code === 0 && r.stdout) return r.stdout;
+    if (r.code !== 0 || !r.stdout) throw ghFailed("gh repo view", r);
+    return r.stdout;
   }
   const r = await capture(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd);
   return r.code === 0 && r.stdout ? r.stdout.replace(/^origin\//, "") : null;

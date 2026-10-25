@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { buildArgv } from "./agents.ts";
 import { judgeCi } from "./ci.ts";
-import { parseChecks } from "./github.ts";
+import { parseChecks, parsePrNumber } from "./github.ts";
 import { parseStartOptions } from "./main.ts";
 import { reviewFileName, runPipeline } from "./pipeline.ts";
 import * as prompts from "./prompts.ts";
-import { assignee, checks, pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
+import {
+  assignee,
+  checks,
+  GH_NO_AUTH,
+  GH_NO_PR,
+  pipelineConfig,
+  pipelineHarness,
+} from "./testing/helpers.ts";
 
 /**
  * 実際に踏んだ欠陥の回帰テスト。
@@ -114,5 +121,51 @@ describe("push 直後の CI を読み違えた", () => {
     });
     const o = await runPipeline(pipelineConfig(assignee("claude"), [assignee("agy")]), h.deps);
     expect(o).toEqual({ kind: "needs-human", reason: "CI の失敗を直せなかった" });
+  });
+});
+
+describe("gh の認証エラーが「PR が作られなかった」に化けた（nuage-cluster #56）", () => {
+  // GH_TOKEN の無いシェルから起動し、gh pr view が認証エラーで落ちた。PR はできていたのに、
+  // prNumber が失敗をすべて null にしていたので「PR が無い」と区別がつかなかった。
+  test("認証エラー（exit 4）は gh の stderr を付けて例外にする", () => {
+    expect(() => parsePrNumber({ code: 4, stdout: "", stderr: GH_NO_AUTH })).toThrow(
+      /gh auth login/,
+    );
+  });
+
+  test("PR が無い（exit 1・no pull requests found）ときだけ null にする", () => {
+    expect(parsePrNumber({ code: 1, stdout: "", stderr: GH_NO_PR })).toBeNull();
+  });
+
+  test("例外はパイプラインを止める（PR が無いことにして先へ進まない）", async () => {
+    const h = pipelineHarness({ commits: [true], github: { pr: 56 } });
+    h.deps.github!.prNumber = async () =>
+      parsePrNumber({ code: 4, stdout: "", stderr: GH_NO_AUTH });
+    await expect(
+      runPipeline(pipelineConfig(assignee("claude"), [assignee("agy")]), h.deps),
+    ).rejects.toThrow(/gh auth login/);
+    expect(h.calls.map((c) => c.kind)).toEqual(["implement"]);
+  });
+});
+
+describe("既存の PR のレビューから再開できなかった（nuage-cluster #56）", () => {
+  // 実装担当は「PR は足りている」と判断して commit せず、「何も commit されなかった」で終わった。
+  // commit が無いのを失敗にするのは意図どおりで、再開する手段が無かったことが欠陥だった。
+  test("--from review は実装担当を呼ばず、PR に対してレビューを走らせる", async () => {
+    const h = pipelineHarness({ commits: [false], startHead: 3, github: { pr: 56 } });
+    const o = await runPipeline(
+      pipelineConfig(assignee("claude"), [assignee("agy")], { from: "review" }),
+      h.deps,
+    );
+    expect(o).toEqual({ kind: "done" });
+    expect(h.calls.some((c) => c.kind === "implement")).toBe(false);
+    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(1);
+    expect(h.logs).toContain("PR #56");
+  });
+
+  test("--from implement で commit が無ければ、今までどおり失敗にする", async () => {
+    const h = pipelineHarness({ commits: [false], startHead: 3, github: { pr: 56 } });
+    const o = await runPipeline(pipelineConfig(assignee("claude"), [assignee("agy")]), h.deps);
+    expect(o).toEqual({ kind: "failed", reason: "何も commit されなかった" });
   });
 });

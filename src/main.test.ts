@@ -75,4 +75,16 @@ describe("parseStartOptions", () => {
       1,
     );
   });
+
+  test("--from の既定は implement で、implement と review だけ受け付ける", async () => {
+    expect((await parseStartOptions(base, onPath("agy"))).from).toBe("implement");
+    expect((await parseStartOptions({ ...base, from: "review" }, onPath("agy"))).from).toBe(
+      "review",
+    );
+    for (const bad of ["fix", "Review", ""]) {
+      await expect(parseStartOptions({ ...base, from: bad }, onPath("agy"))).rejects.toThrow(
+        /--from/,
+      );
+    }
+  });
 });
