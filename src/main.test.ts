@@ -18,6 +18,12 @@ describe("parseStartOptions", () => {
     expect(o2.reviewers).toEqual([{ agent: "claude", models: [] }]);
   });
 
+  test("models.yaml に定義があるエージェントだけを既定のレビュー担当にする", async () => {
+    const models = { agy: { high: [{ model: "m" }] } };
+    const o = await parseStartOptions(base, onPath("claude", "agy", "copilot"), models);
+    expect(o.reviewers).toEqual([{ agent: "agy", models: [] }]);
+  });
+
   test("レビュー担当がいなければ起動しない（レビュー無しで完了にしない）", async () => {
     await expect(parseStartOptions(base, onPath("claude"))).rejects.toThrow(/レビュー担当がいない/);
   });

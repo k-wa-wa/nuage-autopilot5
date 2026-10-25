@@ -49,7 +49,7 @@ const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--
 
   AGENT        ${AGENTS.join(" | ")}（既定: claude）。
                モデルは models.yaml の並びを使う。決め打ちするときは AGENT:MODEL@EFFORT/MODEL と書く（/ の順に試す）
-  --reviewers  レビュー担当（既定: 実装担当以外で PATH にあるもの全部）
+  --reviewers  レビュー担当（既定: 実装担当以外で PATH にあり、models.yaml に定義があるもの）
   --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューは high、要約は light で固定
   --max-rounds 修正ループの上限（1〜10、既定: 3）
   --local      push・PR・CI を行わず、ローカルの差分だけで回す（試運転用）
@@ -93,6 +93,7 @@ export async function parseStartOptions(
     from?: string;
   },
   findAgent: (name: string) => Promise<boolean>,
+  models: ModelTable | null = null,
 ): Promise<StartOptions> {
   let impl: AgentSpec;
   let explicit: AgentSpec[] | null = null;
@@ -128,13 +129,16 @@ export async function parseStartOptions(
   } else {
     reviewers = [];
     for (const agent of AGENTS) {
-      if (agent !== impl.agent && (await findAgent(agent))) reviewers.push({ agent, models: [] });
+      if (agent === impl.agent) continue;
+      if (models && !models[agent]) continue;
+      if (await findAgent(agent)) reviewers.push({ agent, models: [] });
     }
   }
   if (reviewers.length === 0) {
-    throw new UsageError(
-      `レビュー担当がいない。--reviewers で指定するか、${impl.agent} 以外のエージェント CLI を PATH に入れる`,
-    );
+    const hint = models
+      ? `${impl.agent} 以外のエージェントを models.yaml に書き、PATH に入れる`
+      : `${impl.agent} 以外のエージェント CLI を PATH に入れる`;
+    throw new UsageError(`レビュー担当がいない。--reviewers で指定するか、${hint}`);
   }
   return { impl, reviewers, level, maxRounds, local: values.local, from };
 }
@@ -205,11 +209,12 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
+  const models = readModels(modelsPath());
   const opts = await parseStartOptions(
     values,
     async (name) => (await capture(["sh", "-c", `command -v ${name}`], root)).code === 0,
+    models,
   );
-  const models = readModels(modelsPath());
 
   // 既定ブランチへの直接 commit は、ブランチ保護の有無に関わらず起こさせない。
   const branch = await currentBranch(root);
