@@ -36,7 +36,7 @@ v5 は作業場を Orca サーバーに移す。セッション・worktree・UI�
 | `home/AGENTS.md` | 全エージェント共通のルール。話し方・OK で任せる・マージしない |
 | `home/skills/autopilot/` | 窓口の手順。任せ方・報告・途中の割り込み |
 | `src/` | `autopilot-run`。順序と待ちを持ち、判断は LLM に任せる |
-| `nix/module.nix` | `autopilot-run` を入れ、`home/` を各エージェントの読み込み先へ symlink する |
+| `nix/module.nix` | `autopilot-run` を入れ、`home/` を各エージェントの読み込み先へ symlink する。共通ルールの後ろにはホストが渡すルール（`extraRules`、人間個人の約束など）を足す |
 
 ### 通知
 

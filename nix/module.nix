@@ -3,6 +3,7 @@
 # - autopilot-run を PATH に入れる。
 # - home/ の共通ルールとスキルを、各エージェント CLI がホーム全体で読む場所へ symlink する。
 #   リポジトリの .agents/skills ではそのリポジトリでしか効かないため、ホーム側に置く。
+#   共通ルールの後ろには、ホストが渡すルール (extraRules) を足す。
 # - 段階ごとのモデルの並び (models.yaml) を /etc/autopilot5/models.yaml に置く。
 #
 # ~/.claude/settings.json などエージェントや Orca が書き換えるファイルには触れない。
@@ -17,7 +18,10 @@ let
   cfg = config.programs.autopilot5;
   home = config.users.users.${cfg.user}.home;
   group = config.users.users.${cfg.user}.group;
-  rules = ../home/AGENTS.md;
+  # home/AGENTS.md (窓口としてのルール) の後ろに、ホストが渡すルールを足す。
+  rules = pkgs.writeText "AGENTS.md" (
+    lib.concatMapStringsSep "\n" builtins.readFile ([ ../home/AGENTS.md ] ++ cfg.extraRules)
+  );
   skills = ../home/skills;
 
   # エージェントごとの「ホーム全体で読む共通ルール」と「スキル置き場」。
@@ -86,6 +90,16 @@ in
       description = ''
         段階 (high / standard / light) ごとのモデルの並び。エージェント → 段階 → 前から順に試すモデルで書く。
         モデルは頻繁に変わるので、モデル名はこのファイルだけに書く。null なら各 CLI の既定モデルで動く。
+      '';
+    };
+
+    extraRules = lib.mkOption {
+      type = lib.types.listOf lib.types.path;
+      default = [ ];
+      example = lib.literalExpression "[ inputs.nix-config.lib.agentRules ]";
+      description = ''
+        共通ルール (home/AGENTS.md) の後ろに足すルール。
+        人間個人の約束 (言葉・進め方など) のように、autopilot の外で決めて他のホストとも共有するものを置く。
       '';
     };
 

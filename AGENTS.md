@@ -49,3 +49,4 @@ nix build path:.#autopilot-run
 
 - **Git 操作の禁止**: ユーザーからの特別な指示がない限り、コミット・プッシュ・ブランチ作成などの Git 操作は行わない。
 - `home/` はホストのホームに symlink され、全エージェントがそのまま読む。書き換えるときは全エージェント・全リポジトリに効くことを意識する。
+- `home/AGENTS.md` には autopilot の窓口としてのルールだけを書く。人間個人の約束（言葉・進め方など）はホストが `extraRules` で足す（nix-config の `rules.md`）。
