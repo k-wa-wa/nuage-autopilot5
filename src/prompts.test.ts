@@ -4,9 +4,10 @@ import { kindOf, MARKERS } from "./testing/helpers.ts";
 
 const all = {
   implement: prompts.implement("pr"),
-  review: prompts.review("abc123"),
+  review: prompts.review({ baseSha: "abc123", since: null }),
   fix: prompts.fix({
     mode: "pr",
+    scope: "must-should",
     reviews: [".autopilot/review-1-agy.md"],
     ciLog: null,
     inbox: null,
@@ -32,7 +33,7 @@ describe("プロンプト", () => {
   test("--local は push も PR 作成もさせない", () => {
     for (const p of [
       prompts.implement("local"),
-      prompts.fix({ mode: "local", reviews: [], ciLog: null, inbox: null }),
+      prompts.fix({ mode: "local", scope: "must-should", reviews: [], ciLog: null, inbox: null }),
     ]) {
       expect(p).toContain("push と PR 作成はしない");
       expect(p).not.toContain("gh pr create");
@@ -42,7 +43,7 @@ describe("プロンプト", () => {
   test("レビューは基点からの差分を読ませ、ファイルを変えさせない", () => {
     expect(all.review).toContain("git diff abc123...HEAD");
     expect(all.review).toContain("ファイルは一切変更しない");
-    expect(all.review).toContain("指摘なし");
+    expect(all.review).toContain("判定: must なし");
   });
 
   test("レビューは指摘が無くても、何を確かめたかを書かせる（浅いレビューを見分ける）", () => {
@@ -54,6 +55,7 @@ describe("プロンプト", () => {
   test("修正には、渡されたものだけを並べる（優先度つき）", () => {
     const p = prompts.fix({
       mode: "pr",
+      scope: "must-should",
       reviews: [".autopilot/review-1-agy.md", ".autopilot/review-1-copilot.md"],
       ciLog: ".autopilot/ci-fail-1.log",
       inbox: ".autopilot/inbox-1.md",
@@ -68,5 +70,58 @@ describe("プロンプト", () => {
   test("要約は PR があるときだけ PR 本文も更新させる", () => {
     expect(prompts.summarize("abc", 7)).toContain("PR #7 の本文");
     expect(prompts.summarize("abc", null)).not.toContain("PR #");
+  });
+
+  test("レビューは 1 行目に must の有無を書かせ、重要度の基準を示す", () => {
+    expect(all.review).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
+    expect(all.review).toContain("must: 仕様を満たさない");
+  });
+
+  test("レビューは decisions.md の見送りを繰り返させない", () => {
+    expect(all.review).toContain(".autopilot/decisions.md");
+    expect(all.review).toContain("繰り返さない");
+  });
+
+  test("2 周目以降のレビューは、前回レビューした HEAD からの修正を示す", () => {
+    const p = prompts.review({ baseSha: "abc", since: "def" });
+    expect(p).toContain("git diff abc...HEAD");
+    expect(p).toContain("git diff def..HEAD");
+    expect(all.review).not.toContain("前回のレビュー");
+  });
+
+  test("修正の範囲: 1 周目は should まで、2 周目以降は must だけ。nit は直させない", () => {
+    const base = { mode: "pr" as const, reviews: [], ciLog: null, inbox: null };
+    expect(prompts.fix({ ...base, scope: "must-should" })).toContain(
+      "must と should を直す。nit は直さない",
+    );
+    expect(prompts.fix({ ...base, scope: "must" })).toContain(
+      "must だけを直す。should と nit は直さない",
+    );
+  });
+
+  test("修正は、変更しないことを失敗と思わせない", () => {
+    expect(all.fix).toContain("変更しないことは失敗ではない");
+  });
+});
+
+describe("reviewHasMust", () => {
+  test("1 行目が must なしの判定なら false", () => {
+    expect(prompts.reviewHasMust(`${prompts.VERDICT.none}\n- nit: x`)).toBe(false);
+  });
+
+  test("Markdown の装飾や前の空行があっても判定を読む", () => {
+    expect(prompts.reviewHasMust(`\n\n**${prompts.VERDICT.none}**\n`)).toBe(false);
+    expect(prompts.reviewHasMust(`# ${prompts.VERDICT.none}`)).toBe(false);
+    expect(prompts.reviewHasMust("判定:must なし")).toBe(false);
+  });
+
+  test("must ありの判定なら true", () => {
+    expect(prompts.reviewHasMust(`${prompts.VERDICT.must}\n- must: x`)).toBe(true);
+  });
+
+  test("判定が読めなければ、見落とさないよう must ありとみなす", () => {
+    expect(prompts.reviewHasMust("")).toBe(true);
+    expect(prompts.reviewHasMust("指摘なし")).toBe(true);
+    expect(prompts.reviewHasMust(`前置き\n${prompts.VERDICT.none}`)).toBe(true);
   });
 });

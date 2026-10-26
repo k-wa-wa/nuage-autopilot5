@@ -21,15 +21,50 @@ export function implement(mode: ShipMode): string {
 .autopilot/brief.md の仕様を実装し、テストがあれば実行して通す。${ship(mode)}`;
 }
 
-export function review(baseSha: string): string {
+/** レビューの 1 行目。修正ループはこれを読んで、再レビューが要るかを決める。 */
+export const VERDICT = { must: "判定: must あり", none: "判定: must なし" } as const;
+
+export interface ReviewInput {
+  baseSha: string;
+  /** 前回のレビューの時点の HEAD。2 周目以降だけ渡す。 */
+  since: string | null;
+}
+
+export function review(input: ReviewInput): string {
+  const since = input.since
+    ? `\n前回のレビューの後の修正は \`git diff ${input.since}..HEAD\` である。ここを中心に、直っていないものと、修正で新たに壊れたものを見る。`
+    : "";
   return `あなたはコードレビュアーである。ファイルは一切変更しない。
-\`git diff ${baseSha}...HEAD\` の変更を、.autopilot/brief.md の仕様に照らしてレビューする。
-指摘は重要度（must / should / nit）を付けて箇条書きで出力する。問題が無ければ 1 行目を「指摘なし」とする。
+\`git diff ${input.baseSha}...HEAD\` の変更を、.autopilot/brief.md の仕様に照らしてレビューする。${since}
+.autopilot/decisions.md があれば読む。そこで理由を付けて見送った指摘は、その理由が誤っている根拠を示せない限り繰り返さない。
+
+重要度は次のとおり付ける。
+- must: 仕様を満たさない・バグ・データや本番を壊す。直さずに出せないもの
+- should: 直した方がよいが、直さなくても仕様どおり動くもの
+- nit: 好みや体裁
+
+1 行目は「${VERDICT.must}」か「${VERDICT.none}」のどちらかだけを書く。続けて指摘を重要度付きの箇条書きで書く。
 指摘の有無にかかわらず、最後に「確かめたこと:」として、仕様の各項目・テスト・影響範囲のどれをどう確かめたかを 2〜3 行で書く。`;
 }
 
+/**
+ * レビューに must があるか。1 行目の判定だけを読む。
+ * 判定が読めなければ、見落としより再レビューの方が安いので must ありとみなす。
+ */
+export function reviewHasMust(text: string): boolean {
+  const first = text
+    .split("\n")
+    .map((l) => l.replace(/[*#`>_\s]/g, ""))
+    .find((l) => l !== "");
+  return first !== VERDICT.none.replace(/\s/g, "");
+}
+
+/** 修正で直す範囲。1 周目は should まで直し、2 周目以降は must だけにして指摘の連鎖を止める。 */
+export type FixScope = "must-should" | "must";
+
 export interface FixInput {
   mode: ShipMode;
+  scope: FixScope;
   reviews: string[];
   ciLog: string | null;
   inbox: string | null;
@@ -41,14 +76,19 @@ export function fix(input: FixInput): string {
     input.ciLog && `CI の失敗ログ: ${input.ciLog}（必ず直す）`,
     input.reviews.length > 0 && `レビュー結果: ${input.reviews.join(", ")}`,
   ].filter(Boolean);
+  const scope =
+    input.scope === "must-should"
+      ? "レビューの must と should を直す。nit は直さない。"
+      : "レビューの must だけを直す。should と nit は直さない。";
   return `${RULES}
 
 次のファイルを読み、直すべきものを直す。
 ${items.map((i) => `- ${i}`).join("\n")}
 
-レビューの must は原則採用する。見送る指摘は理由を .autopilot/decisions.md に書く。
+${scope}直さない指摘は要約で人間に渡すので、ここで手を入れなくてよい。
+must を見送るときは、理由を .autopilot/decisions.md に書く。
 直したらテストを通して ${ship(input.mode)}
-直すものが無ければ何も変更しない。`;
+直すものが無ければ何も変更しない。変更しないことは失敗ではない。`;
 }
 
 export function summarize(baseSha: string, pr: number | null): string {

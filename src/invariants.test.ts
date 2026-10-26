@@ -49,7 +49,7 @@ describe("責務が 1 箇所に閉じている", () => {
 describe("禁止事項はすべての自律ターンに届く", () => {
   const autonomous = {
     implement: prompts.implement("pr"),
-    fix: prompts.fix({ mode: "pr", reviews: [], ciLog: null, inbox: null }),
+    fix: prompts.fix({ mode: "pr", scope: "must-should", reviews: [], ciLog: null, inbox: null }),
     summarize: prompts.summarize("abc", 7),
   };
 
@@ -64,7 +64,7 @@ describe("禁止事項はすべての自律ターンに届く", () => {
   }
 
   test("レビュー担当には何も書かせない", () => {
-    expect(prompts.review("abc")).toContain("ファイルは一切変更しない");
+    expect(prompts.review({ baseSha: "abc", since: null })).toContain("ファイルは一切変更しない");
   });
 });
 

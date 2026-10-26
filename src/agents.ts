@@ -65,17 +65,61 @@ export function formatInvocation(inv: Invocation): string {
 }
 
 /**
+ * 会話の引き継ぎ。修正担当が実装担当の会話の続きで動けば、コードを一から読み直さずに済む。
+ *
+ * - start: 新しい会話を始める。claude と copilot には id を渡す。agy は ID を先に決められないので、出力から読む
+ * - resume: id の会話の続きで実行する
+ */
+export type SessionRequest = { kind: "start"; id: string } | { kind: "resume"; id: string };
+
+function sessionArgs(agent: AgentName, s: SessionRequest | undefined): string[] {
+  if (!s) return [];
+  switch (agent) {
+    case "claude":
+      return s.kind === "start" ? ["--session-id", s.id] : ["--resume", s.id];
+    case "agy":
+      // 会話 ID は JSON の出力にしか出ない。
+      return [...(s.kind === "resume" ? ["--conversation", s.id] : []), "--output-format", "json"];
+    case "copilot":
+      // --resume は値を省略できるので、= でつなぐ。
+      return s.kind === "start" ? ["--session-id", s.id] : [`--resume=${s.id}`];
+  }
+}
+
+/** 会話を引き継いだ実行の標準出力から、会話 ID と本文を読む。ID が読めなければ session は null。 */
+export function readSessionOutput(
+  agent: AgentName,
+  s: SessionRequest,
+  stdout: string,
+): { session: string | null; text: string } {
+  if (agent !== "agy") return { session: s.id, text: stdout };
+  try {
+    const out: unknown = JSON.parse(stdout);
+    const field = (k: string) => {
+      const v =
+        typeof out === "object" && out !== null ? (out as Record<string, unknown>)[k] : null;
+      return typeof v === "string" ? v : null;
+    };
+    return { session: field("conversation_id") || null, text: field("response") ?? stdout };
+  } catch {
+    return { session: null, text: stdout };
+  }
+}
+
+/**
  * 非対話で 1 ターン実行するコマンド。
  * 人間は不在なので、どのエージェントも権限確認を飛ばす。
  */
-export function buildArgv(inv: Invocation, prompt: string): string[] {
+export function buildArgv(inv: Invocation, prompt: string, session?: SessionRequest): string[] {
   const model = inv.model ? ["--model", inv.model] : [];
+  const conversation = sessionArgs(inv.agent, session);
   const effort = (flag: string) => (inv.effort ? [flag, inv.effort] : []);
   switch (inv.agent) {
     case "claude":
       return [
         "claude",
         ...model,
+        ...conversation,
         ...effort("--effort"),
         "--dangerously-skip-permissions",
         "-p",
@@ -86,12 +130,21 @@ export function buildArgv(inv: Invocation, prompt: string): string[] {
       return [
         "agy",
         ...model,
+        ...conversation,
         ...effort("--effort"),
         "--dangerously-skip-permissions",
         "-p",
         prompt,
       ];
     case "copilot":
-      return ["copilot", ...model, ...effort("--reasoning-effort"), "--yolo", "-p", prompt];
+      return [
+        "copilot",
+        ...model,
+        ...conversation,
+        ...effort("--reasoning-effort"),
+        "--yolo",
+        "-p",
+        prompt,
+      ];
   }
 }

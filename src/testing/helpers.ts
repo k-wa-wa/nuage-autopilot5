@@ -15,7 +15,8 @@ import type { AgentName, Invocation } from "../agents.ts";
 import type { CheckBucket, PrSnapshot } from "../ci.ts";
 import type { GitHub } from "../github.ts";
 import type { Assignee } from "../models.ts";
-import type { Config, Deps } from "../pipeline.ts";
+import type { Config, Deps, SessionPlan } from "../pipeline.ts";
+import { VERDICT } from "../prompts.ts";
 
 /**
  * プロンプトの種類を見分ける目印。偽のエージェントはこれで自分の役割を知る。
@@ -60,6 +61,10 @@ export interface HarnessOptions {
   failAgent?: (inv: Invocation, kind: PromptKind) => boolean;
   /** 失敗する前に作業ツリーを書き換えるか（途中まで書いて落ちた担当）。 */
   dirtyOnFail?: (inv: Invocation, kind: PromptKind) => boolean;
+  /** レビューの本文。省略時は must あり（指摘を直せば再レビューする、今までどおりの流れ）。 */
+  review?: (round: number, reviewer: string) => string;
+  /** 会話 ID を返さないエージェント（出力を読めなかったとき）。 */
+  noSession?: boolean;
 }
 
 /** エージェント・git・GitHub・時計をすべて偽物にした pipeline の依存。 */
@@ -67,7 +72,16 @@ export function pipelineHarness(opts: HarnessOptions) {
   let head = opts.startHead ?? 0;
   let dirty = 0;
   let now = 0;
-  const calls: { inv: Invocation; kind: PromptKind; prompt: string; output?: string }[] = [];
+  const calls: {
+    inv: Invocation;
+    kind: PromptKind;
+    prompt: string;
+    output?: string;
+    session?: SessionPlan;
+    /** 呼ばれた時刻（偽の時計）。 */
+    at: number;
+  }[] = [];
+  let conversations = 0;
   const stages: string[] = [];
   const logs: string[] = [];
   const savedLogs: string[] = [];
@@ -91,15 +105,20 @@ export function pipelineHarness(opts: HarnessOptions) {
     : null;
 
   const deps: Deps = {
-    async runAgent(inv, prompt, output) {
+    async runAgent(inv, prompt, { output, session } = {}) {
       const kind = kindOf(prompt);
-      calls.push({ inv, kind, prompt, output });
+      calls.push({ inv, kind, prompt, output, session, at: now });
       if (opts.failAgent?.(inv, kind)) {
         if (opts.dirtyOnFail?.(inv, kind)) dirty++;
-        return false;
+        return { ok: false, session: null };
       }
       if ((kind === "implement" || kind === "fix") && commits.shift()) head++;
-      return true;
+      const id = !session
+        ? null
+        : session.kind === "resume"
+          ? session.id
+          : `conv${++conversations}`;
+      return { ok: true, session: opts.noSession ? null : id };
     },
     head: async () => `sha${head}`,
     fingerprint: async () => `sha${head}+${dirty}`,
@@ -115,6 +134,11 @@ export function pipelineHarness(opts: HarnessOptions) {
       log: (m) => logs.push(m),
       rel: (n) => `.autopilot/${n}`,
       file: (n) => `/tmp/${n}`,
+      read: (n) => {
+        const m = n.match(/^review-(\d+)-(.+)\.md$/);
+        if (!m) return null;
+        return (opts.review ?? (() => `${VERDICT.must}\n- must: 直す`))(Number(m[1]), m[2]!);
+      },
       takeInbox: (round) => {
         if (!inbox) return null;
         inbox = false;
@@ -260,6 +284,10 @@ if (Array.isArray(actions[0])) {
   writeFileSync(counter, String(n + 1));
   actions = actions[Math.min(n, actions.length - 1)];
 }
+// --output-format json（agy の会話を引き継ぐ実行）では、本文を JSON に包み、会話 ID を返す。
+const json = args.includes("--output-format");
+const said = [];
+const conv = args.includes("--conversation") ? args[args.indexOf("--conversation") + 1] : "agy-conv-1";
 const sh = (...args) => {
   const r = Bun.spawnSync(args, { stdio: ["ignore", "inherit", "inherit"] });
   if (r.exitCode !== 0) process.exit(r.exitCode ?? 1);
@@ -282,8 +310,9 @@ for (const a of actions) {
     const child = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 600000)"]);
     writeFileSync(join(state, "grandchild.pid"), String(child.pid));
     await new Promise(() => {});
-  } else if (a.startsWith("say:")) console.log(a.slice(4));
+  } else if (a.startsWith("say:")) json ? said.push(a.slice(4)) : console.log(a.slice(4));
 }
+if (json) console.log(JSON.stringify({ conversation_id: conv, status: "SUCCESS", response: said.join("\\n") }));
 `;
 
 const FAKE_GH = `
