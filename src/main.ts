@@ -16,6 +16,8 @@ import {
   formatAgentSpec,
   formatInvocation,
   parseAgentSpec,
+  readSessionOutput,
+  type SessionRequest,
 } from "./agents.ts";
 import { capture, killAll, run } from "./exec.ts";
 import {
@@ -288,14 +290,25 @@ async function start(
   return runPipeline(
     { ...roles, maxRounds: opts.maxRounds, baseSha, from: opts.from },
     {
-      async runAgent(inv, prompt, outputName) {
-        state.log(`-> ${formatInvocation(inv)}`);
-        const r = await run(buildArgv(inv, prompt), {
-          cwd: root,
-          logPath,
-          stdoutPath: outputName ? state.file(outputName) : undefined,
-        });
-        return r.code === 0;
+      async runAgent(inv, prompt, { output, session } = {}) {
+        const req: SessionRequest | undefined = session && {
+          kind: session.kind,
+          id: session.kind === "resume" ? session.id : crypto.randomUUID(),
+        };
+        state.log(
+          `-> ${formatInvocation(inv)}${req?.kind === "resume" ? ` (会話 ${req.id} の続き)` : ""}`,
+        );
+        // 会話を引き継ぐ実行は出力の形がエージェントごとに違うので、読んでから本文を run.log に書く。
+        const stdoutPath = output
+          ? state.file(output)
+          : req
+            ? state.file("agent-stdout.log")
+            : undefined;
+        const r = await run(buildArgv(inv, prompt, req), { cwd: root, logPath, stdoutPath });
+        if (!req) return { ok: r.code === 0, session: null };
+        const out = readSessionOutput(inv.agent, req, r.stdout);
+        if (out.text) appendFileSync(logPath, out.text.endsWith("\n") ? out.text : `${out.text}\n`);
+        return { ok: r.code === 0, session: out.session };
       },
       head: () => headSha(root),
       fingerprint: () => worktreeFingerprint(root),

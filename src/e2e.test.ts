@@ -117,6 +117,53 @@ describe("--local", () => {
   );
 });
 
+describe("修正担当は実装担当の会話を引き継ぐ", () => {
+  const argsOf = (kind: string) =>
+    env.world
+      .calls()
+      .filter((c) => c.kind === kind)
+      .map((c) => c.args);
+
+  test(
+    "claude: 実装で決めた会話 ID を、修正で --resume に渡す",
+    async () => {
+      setup();
+      env.world.scripts({
+        claude: { implement: ["commit"], fix: [["commit"], []], summarize: ["result"] },
+        agy: { review: ["say:判定: must あり"] },
+      });
+      const r = await main(["--local"]);
+      expect(r.code).toBe(0);
+      const impl = argsOf("implement")[0]!;
+      const id = impl[impl.indexOf("--session-id") + 1];
+      expect(id).toMatch(/^[0-9a-f-]{36}$/);
+      for (const fix of argsOf("fix")) expect(fix.join(" ")).toContain(`--resume ${id}`);
+      expect(argsOf("fix")).toHaveLength(2);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "agy: JSON の出力から会話 ID を読んで修正に渡し、run.log には本文を書く",
+    async () => {
+      setup();
+      env.world.scripts({
+        agy: { implement: ["commit", "say:実装した"], fix: [], summarize: ["result"] },
+        claude: { review: ["say:判定: must あり"] },
+      });
+      const r = await main(["--local", "--impl", "agy"]);
+      expect(r.code).toBe(0);
+      expect(argsOf("implement")[0]?.join(" ")).toContain("--output-format json");
+      expect(argsOf("fix")[0]?.join(" ")).toContain("--conversation agy-conv-1");
+      const log = read("run.log");
+      expect(log).toContain("実装した\n");
+      expect(log).not.toContain("conversation_id");
+      expect(log).toContain("(会話 agy-conv-1 の続き)");
+    },
+    TIMEOUT,
+  );
+});
+
 describe("起動前の確認", () => {
   test(
     "brief.md が無ければ起動しない",
@@ -384,7 +431,9 @@ agy:
       expect(r.code).toBe(0);
       expect(status()).toBe("done");
       expect(invocations("implement")).toEqual([
-        "claude --model c1 --effort high --dangerously-skip-permissions -p",
+        expect.stringMatching(
+          /^claude --model c1 --session-id [0-9a-f-]{36} --effort high --dangerously-skip-permissions -p$/,
+        ),
       ]);
       expect(invocations("review")).toEqual([
         "agy --model a1 --dangerously-skip-permissions -p",

@@ -16,6 +16,7 @@ import { join } from "node:path";
  *   inbox.md      窓口が書く。実行中に人間から来た追加指示（区切りごとに読む）
  *   status        現在の段階（1 行）。最後は done / needs-human: … / failed: … / stopped: …
  *   run.log       全エージェントの出力
+ *   agent-stdout.log  会話を引き継ぐ実行（実装・修正）の生の標準出力。本文は run.log にも書く
  *   run.pid       実行中のプロセス
  *   decisions.md  実装担当が書く。判断とその理由
  *   result.md     最後に実装担当が書く。人間向けの要約

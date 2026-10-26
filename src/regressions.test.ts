@@ -5,6 +5,7 @@ import { parseChecks, parsePrNumber } from "./github.ts";
 import { parseStartOptions } from "./main.ts";
 import { reviewFileName, runPipeline } from "./pipeline.ts";
 import * as prompts from "./prompts.ts";
+import { VERDICT } from "./prompts.ts";
 import {
   assignee,
   checks,
@@ -60,7 +61,7 @@ describe("同じエージェントのモデル違いのレビューが同じフ�
 describe("レビューが毎回「指摘なし」の 1 行だけで、確かめた範囲が分からなかった（pechka #75 の試運転）", () => {
   // プロンプトが「問題が無ければ『指摘なし』とだけ出力する」だったので、浅いレビューと見分けられなかった。
   test("指摘が無くても、確かめたことを書かせる", () => {
-    const p = prompts.review("abc");
+    const p = prompts.review({ baseSha: "abc", since: null });
     expect(p).toContain("確かめたこと:");
     expect(p).not.toContain("とだけ出力する");
   });
@@ -167,5 +168,24 @@ describe("既存の PR のレビューから再開できなかった（nuage-clu
     const h = pipelineHarness({ commits: [false], startHead: 3, github: { pr: 56 } });
     const o = await runPipeline(pipelineConfig(assignee("claude"), [assignee("agy")]), h.deps);
     expect(o).toEqual({ kind: "failed", reason: "何も commit されなかった" });
+  });
+});
+
+describe("must の無いラウンドでも修正が commit し続け、上限の 3 周まで回った（nuage-cluster #63、nuage-monitoring-stack #15）", () => {
+  // 終わる条件が「修正担当が何も commit しない」だけだった。修正担当は nit まで直して commit し、
+  // その修正に次のレビューがまた nit を付けた。2・3 周目に must は 1 件も無かったのに、1 時間かかった。
+  test("must の無いレビューの後は、再レビューせずに終える", async () => {
+    const h = pipelineHarness({
+      commits: [true, true, true, true],
+      review: () => `${VERDICT.none}\n- should: x\n- nit: y`,
+    });
+    const o = await runPipeline(pipelineConfig(assignee("agy"), [assignee("claude")]), h.deps);
+    expect(o).toEqual({ kind: "done" });
+    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(1);
+  });
+
+  test("修正担当が見送った指摘を、レビュー担当が毎周繰り返した", () => {
+    // レビュー担当は decisions.md を読んでいなかった。
+    expect(prompts.review({ baseSha: "abc", since: "def" })).toContain(".autopilot/decisions.md");
   });
 });

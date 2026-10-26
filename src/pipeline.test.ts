@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CI_LIMITS } from "./ci.ts";
 import { reviewFileName, runPipeline } from "./pipeline.ts";
+import { VERDICT } from "./prompts.ts";
 import { assignee, checks, pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
 const cfg = pipelineConfig(assignee("claude"), [assignee("agy"), assignee("copilot")]);
@@ -48,6 +49,143 @@ describe("runPipeline: 基本の流れ", () => {
     expect(o.kind).toBe("needs-human");
     expect(h.stages.filter((s) => s.startsWith("reviewing"))).toHaveLength(3);
     expect(h.calls.at(-1)?.kind).toBe("summarize");
+  });
+});
+
+describe("runPipeline: 修正ループを指摘の連鎖で回し続けない", () => {
+  const one = pipelineConfig(assignee("claude"), [assignee("agy")]);
+  const none = () => `${VERDICT.none}\n- should: 直すとよい\n- nit: 体裁`;
+  const must = () => `${VERDICT.must}\n- must: 壊れている`;
+  const reviewsOf = (h: ReturnType<typeof pipelineHarness>) =>
+    h.calls.filter((c) => c.kind === "review");
+  const fixesOf = (h: ReturnType<typeof pipelineHarness>) =>
+    h.calls.filter((c) => c.kind === "fix");
+
+  test("1 周目に must が無ければ、should まで直して再レビューせずに終える", async () => {
+    const h = pipelineHarness({ commits: [true, true], review: none });
+    expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
+    expect(reviewsOf(h)).toHaveLength(1);
+    expect(fixesOf(h)[0]?.prompt).toContain("must と should を直す");
+    expect(h.calls.at(-1)?.kind).toBe("summarize");
+    expect(h.stages).not.toContain("");
+  });
+
+  test("must の無い修正は、CI だけ確かめて終える", async () => {
+    const h = pipelineHarness({ commits: [true, true], review: none, github: { pr: 7 } });
+    expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
+    expect(reviewsOf(h)).toHaveLength(1);
+    expect(h.stages).toContain("waiting CI (round 2)");
+  });
+
+  test("must の無い修正で CI が落ちたら、レビューせずに CI だけ直させる", async () => {
+    const h = pipelineHarness({
+      commits: [true, true, true],
+      review: none,
+      github: { pr: 7, snapshots: [checks("pass"), checks("fail"), checks("pass")] },
+    });
+    expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
+    expect(reviewsOf(h)).toHaveLength(1);
+    const second = fixesOf(h)[1]!;
+    expect(second.prompt).toContain(".autopilot/ci-fail-2.log");
+    expect(second.prompt).not.toContain("レビュー結果");
+  });
+
+  test("2 周目以降は must だけを直させる", async () => {
+    const h = pipelineHarness({ commits: [true, true, false], review: must });
+    await runPipeline(one, h.deps);
+    const [first, second] = fixesOf(h);
+    expect(first?.prompt).toContain("must と should を直す");
+    expect(second?.prompt).toContain("must だけを直す");
+  });
+
+  test("2 周目のレビューに must が無ければ、修正担当を呼ばずに終える", async () => {
+    const h = pipelineHarness({
+      commits: [true, true],
+      review: (round) => (round === 1 ? must() : none()),
+    });
+    expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
+    expect(h.calls.map((c) => c.kind)).toEqual([
+      "implement",
+      "review",
+      "fix",
+      "review",
+      "summarize",
+    ]);
+  });
+
+  test("2 周目のレビューは、前回レビューした HEAD からの修正を中心に見させる", async () => {
+    const h = pipelineHarness({ commits: [true, true, false], review: must });
+    await runPipeline(one, h.deps);
+    const [first, second] = reviewsOf(h);
+    expect(first?.prompt).not.toContain("前回のレビューの後の修正");
+    expect(second?.prompt).toContain("git diff sha1..HEAD");
+    expect(second?.prompt).toContain("git diff sha0...HEAD");
+  });
+
+  test("人間の追加指示を受けた修正は、must が無くても再レビューする", async () => {
+    const h = pipelineHarness({ commits: [true, true, false], review: none, inbox: true });
+    expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
+    expect(reviewsOf(h)).toHaveLength(2);
+  });
+
+  test("上限で終わったとき、最後の修正が must でなければ CI を確かめていないと伝える", async () => {
+    const h = pipelineHarness({ commits: [true, true], review: none, github: { pr: 7 } });
+    expect(await runPipeline({ ...one, maxRounds: 1 }, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "修正ループが上限（1 回）に達した。最後の修正の CI を確かめていない",
+    });
+  });
+
+  test("CI 待ちとレビューを同時に進める（CI が終わるのを待たずにレビューを始める）", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      github: { pr: 7, snapshots: [checks("pending"), checks("pending"), checks("pass")] },
+    });
+    expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
+    expect(reviewsOf(h)[0]?.at).toBe(0);
+    expect(fixesOf(h)[0]?.at).toBeGreaterThan(0);
+  });
+});
+
+describe("runPipeline: 修正担当は実装担当の会話を引き継ぐ", () => {
+  const one = pipelineConfig(assignee("claude"), [assignee("agy")]);
+
+  test("実装で会話を始め、修正はその続きで行う。レビューと要約は会話を持たない", async () => {
+    const h = pipelineHarness({ commits: [true, true, false] });
+    await runPipeline(one, h.deps);
+    expect(h.calls.map((c) => `${c.kind}:${JSON.stringify(c.session ?? null)}`)).toEqual([
+      'implement:{"kind":"start"}',
+      "review:null",
+      'fix:{"kind":"resume","id":"conv1"}',
+      "review:null",
+      'fix:{"kind":"resume","id":"conv1"}',
+      "summarize:null",
+    ]);
+  });
+
+  test("会話 ID を読めなければ、修正は新しい会話で始め、そのことをログに残す", async () => {
+    const h = pipelineHarness({ commits: [true, false], noSession: true });
+    await runPipeline(one, h.deps);
+    expect(h.calls.find((c) => c.kind === "fix")?.session).toEqual({ kind: "start" });
+    expect(h.logs).toContain("会話 ID を読めなかった。次の修正は新しい会話で始める");
+  });
+
+  test("--from review では、最初の修正で会話を始め、次の修正はその続きで行う", async () => {
+    const h = pipelineHarness({ commits: [true, false], startHead: 2 });
+    await runPipeline({ ...one, from: "review" }, h.deps);
+    expect(h.calls.filter((c) => c.kind === "fix").map((c) => c.session)).toEqual([
+      { kind: "start" },
+      { kind: "resume", id: "conv1" },
+    ]);
+  });
+
+  test("実装の試し直しで別のモデルに切り替えても、修正は成功した会話の続きで行う", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      failAgent: (inv, k) => k === "implement" && inv.model === "c1",
+    });
+    await runPipeline(pipelineConfig(assignee("claude", "c1", "c2"), [assignee("agy")]), h.deps);
+    expect(h.calls.find((c) => c.kind === "fix")?.session).toEqual({ kind: "resume", id: "conv1" });
   });
 });
 
@@ -143,7 +281,7 @@ describe("runPipeline: CI", () => {
     expect(await runPipeline(cfg, h.deps)).toEqual({ kind: "done" });
     expect(h.savedLogs).toEqual(["sha1"]);
     expect(h.calls.find((c) => c.kind === "fix")?.prompt).toContain(".autopilot/ci-fail-1.log");
-    expect(h.stages.filter((s) => s.startsWith("waiting CI"))).toHaveLength(2);
+    expect(h.stages.filter((s) => s.includes("waiting CI"))).toHaveLength(2);
   });
 
   test("CI の失敗を直せなければ人間に戻す", async () => {
@@ -298,7 +436,7 @@ describe("runPipeline: --from review", () => {
     expect(await runPipeline(fromReview, h.deps)).toEqual({ kind: "done" });
     expect(h.calls.map((c) => c.kind)).toEqual(["review", "fix", "summarize"]);
     expect(h.stages.some((s) => s.startsWith("implementing"))).toBe(false);
-    expect(h.stages[0]).toBe("waiting CI (round 1)");
+    expect(h.stages[0]).toBe("reviewing (round 1: agy) + waiting CI");
     expect(h.logs).toContain("PR #56");
   });
 
