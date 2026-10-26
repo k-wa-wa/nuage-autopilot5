@@ -132,6 +132,10 @@ describe("全エージェント共通のルール（home/）", () => {
     }
   });
 
+  test("autopilot-run をシェルから切り離して起動させない（終わっても窓口が起こされない）", () => {
+    expect(skill).toContain("シェルから切り離さない");
+  });
+
   test("スキルの frontmatter に name と description がある（エージェントが見つけられる）", () => {
     expect(skill).toMatch(/^---\nname: autopilot\ndescription: .+\n---/);
   });
