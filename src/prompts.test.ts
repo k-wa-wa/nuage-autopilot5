@@ -77,6 +77,27 @@ describe("プロンプト", () => {
     expect(all.review).toContain("must: 仕様を満たさない");
   });
 
+  test("レビューは差分を疑って読み、具体的な批判的観点をすべて点検させる", () => {
+    expect(all.review).toContain("差分を疑って読み、壊れるシナリオや盲点を積極的に探す");
+    for (const aspect of [
+      "仕様の充足",
+      "過剰な変更（頼まれていない変更）",
+      "エッジケース・境界値・異常系",
+      "null・空値・タイムアウト・リソースリーク・エラー処理",
+      "セキュリティ・権限・秘密情報",
+      "AGENTS.md",
+      "副作用・退行（Regression）",
+      "テストの妥当性と十分性",
+    ]) {
+      expect(all.review).toContain(aspect);
+    }
+  });
+
+  test("レビューは must が無くても should や nit を積極的に挙げさせる（1 行目の判定で抑制させない）", () => {
+    expect(all.review).toContain("should や nit として積極的に挙げる");
+    expect(all.review).toContain("should や nit があれば「指摘なし」とせず続けてすべて書く");
+  });
+
   test("レビューは decisions.md の見送りを繰り返させない", () => {
     expect(all.review).toContain(".autopilot/decisions.md");
     expect(all.review).toContain("繰り返さない");
