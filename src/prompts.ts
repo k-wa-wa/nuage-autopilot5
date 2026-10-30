@@ -52,8 +52,8 @@ export function review(input: ReviewInput): string {
 - nit: 好みや体裁・より良い書き方の提案
 
 出力する前に上の全観点で指摘（must / should / nit）を洗い出す。
-1 行目は「${VERDICT.must}」か「${VERDICT.none}」のどちらかだけを書く（「${VERDICT.none}」は must が 0 件という意味であり、should や nit があれば「指摘なし」とせず続けてすべて書く）。
-続けて指摘を重要度付きの箇条書きで書く。
+1 行目は「${VERDICT.must}」か「${VERDICT.none}」の文字列だけを書き、ほかの語は足さない。
+2 行目以降に、指摘を重要度付きの箇条書きで書く（「${VERDICT.none}」は must が 0 件という意味であり、should や nit があれば「指摘なし」とせず続けてすべて書く）。
 指摘の有無にかかわらず、最後に「確かめたこと:」として、各観点・仕様の各項目・テスト・影響範囲のどれをどう確かめたかを 2〜3 行で書く。`;
 }
 

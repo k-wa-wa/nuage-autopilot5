@@ -72,8 +72,9 @@ describe("プロンプト", () => {
     expect(prompts.summarize("abc", null)).not.toContain("PR #");
   });
 
-  test("レビューは 1 行目に must の有無を書かせ、重要度の基準を示す", () => {
+  test("レビューは 1 行目に must の有無だけを書かせ、重要度の基準を示す", () => {
     expect(all.review).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
+    expect(all.review).toContain("ほかの語は足さない");
     expect(all.review).toContain("must: 仕様を満たさない");
   });
 
@@ -93,9 +94,8 @@ describe("プロンプト", () => {
     }
   });
 
-  test("レビューは must が無くても should や nit を積極的に挙げさせる（1 行目の判定で抑制させない）", () => {
+  test("レビューは軽微な懸念や改善点も should や nit として積極的に挙げさせる", () => {
     expect(all.review).toContain("should や nit として積極的に挙げる");
-    expect(all.review).toContain("should や nit があれば「指摘なし」とせず続けてすべて書く");
   });
 
   test("レビューは decisions.md の見送りを繰り返させない", () => {
@@ -144,5 +144,6 @@ describe("reviewHasMust", () => {
     expect(prompts.reviewHasMust("")).toBe(true);
     expect(prompts.reviewHasMust("指摘なし")).toBe(true);
     expect(prompts.reviewHasMust(`前置き\n${prompts.VERDICT.none}`)).toBe(true);
+    expect(prompts.reviewHasMust(`${prompts.VERDICT.none}（should あり）`)).toBe(true);
   });
 });
