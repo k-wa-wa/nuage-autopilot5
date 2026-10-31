@@ -189,3 +189,11 @@ describe("must の無いラウンドでも修正が commit し続け、上限の
     expect(prompts.review({ baseSha: "abc", since: "def" })).toContain(".autopilot/decisions.md");
   });
 });
+
+describe("レビューが仕様受入検査に偏り、ほぼ毎回「must なし / 指摘なし」で修正ループが形骸化した（nuage-cluster、nuage-dr、nuage-usage-ledger）", () => {
+  // 1 行目に「判定: must なし」と書いた確証バイアスで、should や nit まで「指摘なし」と省略されていた。
+  test("1 行目が must なしでも should / nit を省略せず出させる", () => {
+    const p = prompts.review({ baseSha: "abc", since: null });
+    expect(p).toContain("should や nit があれば「指摘なし」とせず続けてすべて書く");
+  });
+});

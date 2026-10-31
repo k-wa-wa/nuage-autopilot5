@@ -72,9 +72,30 @@ describe("プロンプト", () => {
     expect(prompts.summarize("abc", null)).not.toContain("PR #");
   });
 
-  test("レビューは 1 行目に must の有無を書かせ、重要度の基準を示す", () => {
+  test("レビューは 1 行目に must の有無だけを書かせ、重要度の基準を示す", () => {
     expect(all.review).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
+    expect(all.review).toContain("ほかの語は足さない");
     expect(all.review).toContain("must: 仕様を満たさない");
+  });
+
+  test("レビューは差分を疑って読み、具体的な批判的観点をすべて点検させる", () => {
+    expect(all.review).toContain("差分を疑って読み、壊れるシナリオや盲点を積極的に探す");
+    for (const aspect of [
+      "仕様の充足",
+      "過剰な変更（頼まれていない変更）",
+      "エッジケース・境界値・異常系",
+      "null・空値・タイムアウト・リソースリーク・エラー処理",
+      "セキュリティ・権限・秘密情報",
+      "AGENTS.md",
+      "副作用・退行（Regression）",
+      "テストの妥当性と十分性",
+    ]) {
+      expect(all.review).toContain(aspect);
+    }
+  });
+
+  test("レビューは軽微な懸念や改善点も should や nit として積極的に挙げさせる", () => {
+    expect(all.review).toContain("should や nit として積極的に挙げる");
   });
 
   test("レビューは decisions.md の見送りを繰り返させない", () => {
@@ -123,5 +144,6 @@ describe("reviewHasMust", () => {
     expect(prompts.reviewHasMust("")).toBe(true);
     expect(prompts.reviewHasMust("指摘なし")).toBe(true);
     expect(prompts.reviewHasMust(`前置き\n${prompts.VERDICT.none}`)).toBe(true);
+    expect(prompts.reviewHasMust(`${prompts.VERDICT.none}（should あり）`)).toBe(true);
   });
 });
