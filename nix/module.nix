@@ -5,6 +5,8 @@
 #   リポジトリの .agents/skills ではそのリポジトリでしか効かないため、ホーム側に置く。
 #   共通ルールの後ろには、ホストが渡すルール (extraRules) を足す。
 # - 段階ごとのモデルの並び (models.yaml) を /etc/autopilot5/models.yaml に置く。
+# - メトリクス収集 (metrics.enable) が有効な場合、単価定義を /etc/autopilot5/rates.yaml に配置し、
+#   systemd user サービスおよびタイマーで定期的にメトリクスを収集する。
 #
 # ~/.claude/settings.json などエージェントや Orca が書き換えるファイルには触れない。
 {
@@ -108,6 +110,23 @@ in
       default = builtins.attrNames targets;
       description = "共通ルールとスキルを配るエージェント CLI。";
     };
+
+    metrics = {
+      enable = lib.mkEnableOption "AI Agent 使用量メトリクス収集と VictoriaMetrics 連携";
+
+      ratesFile = lib.mkOption {
+        type = lib.types.path;
+        default = ../metrics/rates.yaml;
+        description = "配置するモデル単価定義ファイル (rates.yaml)。";
+      };
+
+      interval = lib.mkOption {
+        type = lib.types.str;
+        default = "*:0/1";
+        example = "*:0/1";
+        description = "メトリクス収集を実行する systemd タイマー間隔 (OnCalendar)。";
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -115,6 +134,36 @@ in
     environment.etc."autopilot5/models.yaml" = lib.mkIf (cfg.models != null) {
       source = checkedModels;
     };
+    environment.etc."autopilot5/rates.yaml" = lib.mkIf cfg.metrics.enable {
+      source = cfg.metrics.ratesFile;
+    };
     systemd.tmpfiles.rules = lib.concatMap rulesFor cfg.agents;
+
+    systemd.user.timers.ai-agent-metrics-collector = lib.mkIf cfg.metrics.enable {
+      description = "AI Agent 使用量メトリクス定期収集タイマー";
+      wantedBy = [ "timers.target" ];
+
+      unitConfig = {
+        ConditionUser = cfg.user;
+      };
+
+      timerConfig = {
+        OnCalendar = cfg.metrics.interval;
+        Persistent = true;
+      };
+    };
+
+    systemd.user.services.ai-agent-metrics-collector = lib.mkIf cfg.metrics.enable {
+      description = "AI Agent 使用量メトリクス収集と VictoriaMetrics 連携";
+
+      unitConfig = {
+        ConditionUser = cfg.user;
+      };
+
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.python3}/bin/python3 ${../metrics/collector.py} --rates-file /etc/autopilot5/rates.yaml";
+      };
+    };
   };
 }
