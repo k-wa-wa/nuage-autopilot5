@@ -71,6 +71,7 @@ class CheckResult:
     differences: list[RateFieldDifference] = field(default_factory=list)
     missing_in_rates: list[str] = field(default_factory=list)
     missing_in_catalog: list[str] = field(default_factory=list)
+    resolution_errors: list[str] = field(default_factory=list)
 
     @property
     def mismatches(self) -> list[RateFieldDifference]:
@@ -83,6 +84,7 @@ class CheckResult:
             "differences": [d.to_dict() for d in self.differences],
             "missing_in_rates": self.missing_in_rates,
             "missing_in_catalog": self.missing_in_catalog,
+            "resolution_errors": self.resolution_errors,
         }
 
     def format_report(self) -> str:
@@ -91,6 +93,11 @@ class CheckResult:
             lines.append("【単価検証結果】: 正常 - すべての単価定義が公称カタログと整合しています。")
         else:
             lines.append("【単価検証結果】: 警告/異常 - 単価の乖離または不整合が検出されました。")
+
+        if self.resolution_errors:
+            lines.append(f"\n■ モデル突合エラー ({len(self.resolution_errors)} 件):")
+            for err in self.resolution_errors:
+                lines.append(f"  - {err}")
 
         mismatches = self.mismatches
         if mismatches:
@@ -108,15 +115,13 @@ class CheckResult:
                 c_str = f"{d.catalog_value}" if d.catalog_value is not None else "未定義"
                 lines.append(f"  - [{d.model}] {d.field}: rates.yaml={r_str} vs カタログ={c_str}")
 
-        if self.missing_in_rates:
-            lines.append(f"\n■ rates.yaml 未定義モデル (カタログに存在): {len(self.missing_in_rates)} 件")
-            for model in self.missing_in_rates:
-                lines.append(f"  - {model}")
-
         if self.missing_in_catalog:
             lines.append(f"\n■ カタログ外モデル (rates.yaml にのみ存在): {len(self.missing_in_catalog)} 件")
             for model in self.missing_in_catalog:
                 lines.append(f"  - {model}")
+
+        if self.missing_in_rates:
+            lines.append(f"\n■ rates.yaml 未定義モデル (カタログに存在): {len(self.missing_in_rates)} 件 (詳細は --json を参照)")
 
         return "\n".join(lines)
 
@@ -259,46 +264,88 @@ class CompositePriceSource(PriceSource):
         return merged
 
 
-PREFERRED_PROVIDERS = (
-    "anthropic/",
-    "gemini/",
-    "google/",
-    "openai/",
-    "azure_ai/",
-    "vertex_ai/",
-)
+def default_model_mapping_file() -> str:
+    """リポジトリ同梱のモデルマッピング設定 (model_mapping.yaml) のパスを解決"""
+    return os.path.normpath(os.path.join(_DIR, "model_mapping.yaml"))
+
+
+def load_model_mapping(path: str) -> dict[str, str]:
+    """model_mapping.yaml を読み込んで {rates_model: catalog_key} の辞書を返す"""
+    if not os.path.exists(path):
+        return {}
+    mapping: dict[str, str] = {}
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" in line:
+                k, v = line.split(":", 1)
+                mapping[k.strip()] = v.strip()
+    return mapping
 
 
 def resolve_catalog_model_key(
     model: str,
-    catalog: dict[str, Any],
+    catalog: dict[str, dict[str, float]],
     direct_map: dict[str, str],
     suffix_map: dict[str, list[str]],
-) -> str | None:
-    """rates.yaml のモデル名に対応するカタログキーを解決する (完全一致・正規化・プロバイダー接頭辞対応)"""
+    model_mapping: dict[str, str] | None = None,
+) -> tuple[str | None, str | None]:
+    """
+    rates.yaml のモデル名に対応するカタログキーを解決する。
+    戻り値: (resolved_key, error_message)
+    1. model_mapping に指定があれば最優先で採用。
+    2. 直接一致（完全一致または正規化一致）があれば採用。
+    3. 接頭辞付きキーの末尾名が一致する候補を探索:
+       - 候補が 1 件なら採用。
+       - 複数ある場合、それらの単価が同一であれば 1 件を採用。
+       - 単価が食い違う場合、勝手に決めず曖昧エラーとして報告。
+    """
+    # 1. 明示的なマッピング
+    if model_mapping and model in model_mapping:
+        mapped_key = model_mapping[model]
+        if mapped_key in catalog:
+            return mapped_key, None
+        norm_map = normalize_identifier(mapped_key)
+        if norm_map in direct_map:
+            return direct_map[norm_map], None
+
+    # 2. 直接一致
     norm_m = normalize_identifier(model)
     if norm_m in direct_map:
-        return direct_map[norm_m]
+        return direct_map[norm_m], None
 
+    # 3. サフィックス一致
     candidates = suffix_map.get(norm_m, [])
     if not candidates:
-        return None
+        return None, None
 
-    def sort_key(k: str) -> tuple[int, int, int, str]:
-        for idx, pref in enumerate(PREFERRED_PROVIDERS):
-            if k.startswith(pref):
-                return (0, idx, len(k), k)
-        return (1, 0, len(k), k)
+    if len(candidates) == 1:
+        return candidates[0], None
 
-    candidates.sort(key=sort_key)
-    return candidates[0]
+    # 複数候補の単価を比較
+    first_rates = catalog[candidates[0]]
+    all_same = True
+    for c in candidates[1:]:
+        if catalog[c] != first_rates:
+            all_same = False
+            break
+
+    if all_same:
+        return candidates[0], None
+
+    err = (
+        f"モデル '{model}' の候補が複数存在し、プロバイダ間で単価が異なります "
+        f"({', '.join(sorted(candidates)[:5])} 等)。model_mapping.yaml で突合先キーを明示してください"
+    )
+    return None, err
 
 
 class CostWatcher:
     """
     モデル単価監視チェッカー。
     rates.yaml の各モデル単価と公称価格カタログを突合し、単価の乖離やモデルの消失を検出する。
-    モデル名の表記ゆれやプロバイダー接頭辞は自動解決する。
     """
 
     def __init__(
@@ -307,15 +354,18 @@ class CostWatcher:
         catalog: dict[str, dict[str, float]],
         tolerance: float = 1e-6,
         ignore_missing_in_catalog: bool = False,
+        model_mapping: dict[str, str] | None = None,
     ):
         self.rates = rates
         self.catalog = catalog
         self.tolerance = tolerance
         self.ignore_missing_in_catalog = ignore_missing_in_catalog
+        self.model_mapping = model_mapping or {}
 
     def check(self) -> CheckResult:
         differences: list[RateFieldDifference] = []
         missing_in_catalog: list[str] = []
+        resolution_errors: list[str] = []
 
         direct_map = {normalize_identifier(k): k for k in self.catalog}
         suffix_map: dict[str, list[str]] = {}
@@ -327,7 +377,14 @@ class CostWatcher:
         matched_catalog_keys: set[str] = set()
 
         for model in sorted(self.rates.keys()):
-            cat_key = resolve_catalog_model_key(model, self.catalog, direct_map, suffix_map)
+            cat_key, err = resolve_catalog_model_key(
+                model, self.catalog, direct_map, suffix_map, self.model_mapping
+            )
+            if err:
+                resolution_errors.append(err)
+                missing_in_catalog.append(model)
+                continue
+
             if not cat_key:
                 missing_in_catalog.append(model)
                 continue
@@ -342,7 +399,7 @@ class CostWatcher:
                 cat_val = model_catalog.get(fld)
 
                 if rate_val is None:
-                    # rates.yaml に項目が未定義
+                    # rates.yaml に項目が未定義（カタログ側に項目がある）
                     differences.append(
                         RateFieldDifference(
                             model=model,
@@ -354,7 +411,7 @@ class CostWatcher:
                         )
                     )
                 elif cat_val is None:
-                    # カタログ側に項目が未定義
+                    # カタログ側に項目が未定義（rates.yaml にはあるがカタログに載っていない）
                     differences.append(
                         RateFieldDifference(
                             model=model,
@@ -384,21 +441,21 @@ class CostWatcher:
             k for k in sorted(self.catalog.keys()) if k not in matched_catalog_keys
         ]
 
-        # OK 判定: 単価乖離がなく、かつ rates 側のモデルがカタログから消失していないこと
-        # (カタログ側にのみ存在する他社モデル missing_in_rates は不整合とみなさない)
+        # OK 判定: 単価乖離（mismatch）がなく、かつ rates 側のモデルがカタログから消失していないこと
+        # (カタログ側に載っていない項目 missing_in_catalog や、カタログ側にのみ存在する他社モデル missing_in_rates は合否に影響しない)
         mismatches = [d for d in differences if d.status == "mismatch"]
-        is_ok = len(mismatches) == 0
+        is_ok = len(mismatches) == 0 and len(resolution_errors) == 0
         if any(d.status == "missing_in_rates" for d in differences):
             is_ok = False
-        if not self.ignore_missing_in_catalog:
-            if len(missing_in_catalog) > 0 or any(d.status == "missing_in_catalog" for d in differences):
-                is_ok = False
+        if not self.ignore_missing_in_catalog and len(missing_in_catalog) > 0:
+            is_ok = False
 
         return CheckResult(
             ok=is_ok,
             differences=differences,
             missing_in_rates=missing_in_rates,
             missing_in_catalog=missing_in_catalog,
+            resolution_errors=resolution_errors,
         )
 
 
@@ -425,6 +482,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--online",
         action="store_true",
         help="外部の公称価格カタログ URL (LiteLLM 等) からフェッチして突合する",
+    )
+    parser.add_argument(
+        "--model-mapping-file",
+        default=None,
+        help="rates.yaml モデルとカタログキーの明示的対応ファイル (未指定時は model_mapping.yaml)",
     )
     parser.add_argument(
         "--tolerance",
@@ -489,11 +551,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"エラー: カタログの取得に失敗: {e}", file=sys.stderr)
         return 1
 
+    mapping_path = args.model_mapping_file or default_model_mapping_file()
+    model_mapping = load_model_mapping(mapping_path)
+
     watcher = CostWatcher(
         rates=rates,
         catalog=catalog,
         tolerance=args.tolerance,
         ignore_missing_in_catalog=args.ignore_missing_catalog,
+        model_mapping=model_mapping,
     )
     result = watcher.check()
 

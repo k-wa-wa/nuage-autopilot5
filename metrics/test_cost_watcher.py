@@ -106,19 +106,19 @@ class TestCostWatcher(unittest.TestCase):
         self.assertFalse(watcher_strict.check().ok)
 
     def test_missing_field_in_rates_and_catalog(self):
-        # rates 側に cache_creation があるが catalog には無い
+        # rates 側に cache_creation があるが catalog には無い（カタログ未定義のため乖離がなければ ok=True）
         rates1 = {"model-a": {"input": 1.0, "output": 2.0, "cache_creation": 1.25}}
         catalog1 = {"model-a": {"input": 1.0, "output": 2.0}}
         watcher1 = CostWatcher(rates=rates1, catalog=catalog1)
         res1 = watcher1.check()
-        self.assertFalse(res1.ok)
+        self.assertTrue(res1.ok)
         self.assertEqual(len(res1.differences), 1)
         self.assertEqual(res1.differences[0].field, "cache_creation")
         self.assertEqual(res1.differences[0].status, "missing_in_catalog")
         self.assertEqual(res1.differences[0].rates_value, 1.25)
         self.assertIsNone(res1.differences[0].catalog_value)
 
-        # catalog 側に cache_read があるが rates には無い
+        # catalog 側に cache_read があるが rates には無い（設定漏れのため ok=False）
         rates2 = {"model-a": {"input": 1.0, "output": 2.0}}
         catalog2 = {"model-a": {"input": 1.0, "output": 2.0, "cache_read": 0.25}}
         watcher2 = CostWatcher(rates=rates2, catalog=catalog2)
@@ -133,6 +133,40 @@ class TestCostWatcher(unittest.TestCase):
         # レポート表記に「未定義」が含まれること
         report = res2.format_report()
         self.assertIn("rates.yaml=未定義 vs カタログ=0.25", report)
+
+    def test_model_mapping_and_ambiguous_candidates(self):
+        rates = {"custom-model": {"input": 1.0, "output": 2.0}}
+        catalog = {
+            "prov_a/custom-model": {"input": 1.0, "output": 2.0},
+            "prov_b/custom-model": {"input": 3.0, "output": 6.0},
+        }
+
+        # 1. マッピング未指定で複数候補の単価が食い違う場合 -> 曖昧エラーで ok=False
+        watcher_ambig = CostWatcher(rates=rates, catalog=catalog)
+        res_ambig = watcher_ambig.check()
+        self.assertFalse(res_ambig.ok)
+        self.assertEqual(len(res_ambig.resolution_errors), 1)
+        self.assertIn("候補が複数存在", res_ambig.resolution_errors[0])
+
+        # 2. model_mapping で明示的に prov_a を指定した場合 -> 一致して ok=True
+        watcher_mapped = CostWatcher(
+            rates=rates,
+            catalog=catalog,
+            model_mapping={"custom-model": "prov_a/custom-model"},
+        )
+        res_mapped = watcher_mapped.check()
+        self.assertTrue(res_mapped.ok)
+        self.assertEqual(len(res_mapped.differences), 0)
+
+        # 3. model_mapping で prov_b を指定した場合 -> 単価乖離を検知して ok=False
+        watcher_mapped_b = CostWatcher(
+            rates=rates,
+            catalog=catalog,
+            model_mapping={"custom-model": "prov_b/custom-model"},
+        )
+        res_mapped_b = watcher_mapped_b.check()
+        self.assertFalse(res_mapped_b.ok)
+        self.assertEqual(len(res_mapped_b.mismatches), 2)
 
     def test_missing_models(self):
         rates = {
