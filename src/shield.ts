@@ -464,27 +464,38 @@ export async function runPreCommit(
     const commonDir = commonDirRes.stdout.trim();
     const localHook = resolve(cwd, commonDir, "hooks", "pre-commit");
     if (existsSync(localHook)) {
+      let isSelf = false;
       try {
-        // 現在実行中のプロセス自身（ラッパーや autopilot-run スクリプト）との無限再帰を防ぐ
         const hookReal = realpathSync(localHook);
-        const selfScript = process.argv[1] ? realpathSync(process.argv[1]) : "";
-        const isSelf =
-          hookReal === selfScript ||
-          hookReal.endsWith("autopilot5/hooks/pre-commit") ||
-          hookReal.endsWith("autopilot-shield/pre-commit");
-        if (!isSelf) {
-          const content = readFileSync(localHook, "utf8");
-          if (!content.includes("autopilot-run shield pre-commit")) {
-            const child = Bun.spawn([localHook, ...hookArgs], {
-              cwd,
-              stdio: ["inherit", "inherit", "inherit"],
-            });
-            const code = await child.exited;
-            if (code !== 0) return code;
-          }
+        const selfExec = realpathSync(process.execPath);
+        if (hookReal === selfExec || hookReal.includes("autopilot5/hooks/pre-commit")) {
+          isSelf = true;
         }
       } catch {
-        // パス解決・読み取り不可時はスキップ
+        // パス解決失敗時は内容で判定
+      }
+
+      let content = "";
+      try {
+        content = readFileSync(localHook, "utf8");
+      } catch {
+        // 読み取り失敗
+      }
+
+      if (
+        content.includes("autopilot secret-shield pre-commit hook") ||
+        content.includes("autopilot-run shield pre-commit")
+      ) {
+        isSelf = true;
+      }
+
+      if (!isSelf) {
+        const child = Bun.spawn([localHook, ...hookArgs], {
+          cwd,
+          stdio: ["inherit", "inherit", "inherit"],
+        });
+        const code = await child.exited;
+        if (code !== 0) return code;
       }
     }
   }
