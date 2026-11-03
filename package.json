@@ -1,17 +1,18 @@
 {
-  "name": "autopilot-run",
+  "name": "nuage-autopilot5",
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "start": "bun run src/main.ts",
     "test": "bun test --isolate",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check --error-on-warnings src",
-    "lint:fix": "biome check --write src",
+    "lint": "biome check --error-on-warnings packages",
+    "lint:fix": "biome check --write packages",
     "check": "bun run typecheck && bun run lint",
-    "build": "bun build --compile --outfile dist/autopilot-run src/main.ts",
-    "format": "biome format --write src"
+    "format": "biome format --write packages"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.11",

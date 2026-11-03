@@ -54,11 +54,12 @@ describe("禁止事項はすべての自律ターンに届く", () => {
   };
 
   for (const [kind, p] of Object.entries(autonomous)) {
-    test(`${kind}: マージ・クローズ・既定ブランチへの push・.autopilot/ のコミットを禁じ、質問させない`, () => {
+    test(`${kind}: マージ・クローズ・既定ブランチへの push・.autopilot/ のコミット・機密情報の投稿を禁じ、質問させない`, () => {
       expect(p).toContain("PR のマージ");
       expect(p).toContain("Issue・PR のクローズ");
       expect(p).toContain("既定ブランチへの push");
       expect(p).toContain(".autopilot/ のコミット");
+      expect(p).toContain("機密情報");
       expect(p).toContain("質問しない");
     });
   }
@@ -95,7 +96,7 @@ describe("モデル名は models.yaml だけに書く", () => {
   });
 
   test("home/（窓口が読むルールとスキル）に実在のモデル名を書かない", () => {
-    const hits = homeFiles(join(SRC, "..", "home")).filter((f) =>
+    const hits = homeFiles(join(SRC, "../../../home")).filter((f) =>
       REAL_MODEL.test(readFileSync(f, "utf8")),
     );
     expect(hits).toEqual([]);
@@ -103,7 +104,7 @@ describe("モデル名は models.yaml だけに書く", () => {
 });
 
 describe("全エージェント共通のルール（home/）", () => {
-  const home = join(SRC, "..", "home");
+  const home = join(SRC, "../../../home");
   const rules = readFileSync(join(home, "AGENTS.md"), "utf8");
   const skill = readFileSync(join(home, "skills", "autopilot", "SKILL.md"), "utf8");
 
@@ -112,8 +113,9 @@ describe("全エージェント共通のルール（home/）", () => {
     expect(rules).toContain("自分で実装しない");
   });
 
-  test("マージ・クローズ・既定ブランチへの push を禁じる", () => {
+  test("マージ・クローズ・既定ブランチへの push、機密情報の投稿を禁じる", () => {
     expect(rules).toMatch(/PR のマージ、Issue・PR のクローズ、既定ブランチへの push はしない/);
+    expect(rules).toContain("機密情報");
   });
 
   test("スキルは実在するコマンドとファイルだけを案内する", () => {
