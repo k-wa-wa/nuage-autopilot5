@@ -47,21 +47,24 @@ class TestCostWatcher(unittest.TestCase):
         self.assertEqual(res.missing_in_catalog, [])
 
     def test_model_name_normalization_variants(self):
-        # 表記ゆれ（ドット vs ハイフン）があっても同一モデルとして突合できること
+        # 表記ゆれ（ドット vs ハイフン）やプロバイダー接頭辞があっても突合できること
         rates = {
             "claude-opus-5-5": {"input": 15.0, "output": 75.0},
             "gemini-3.8-flash": {"input": 0.1, "output": 0.4},
+            "gpt-oss-120b": {"input": 0.15, "output": 0.6},
         }
         catalog = {
             "claude-opus-5.5": {"input": 15.0, "output": 75.0},
             "gemini-3-8-flash": {"input": 0.1, "output": 0.4},
+            "azure_ai/gpt-oss-120b": {"input": 0.15, "output": 0.6},
+            "other-unknown-model": {"input": 1.0, "output": 2.0},  # カタログ側余剰モデル
         }
         watcher = CostWatcher(rates=rates, catalog=catalog)
         res = watcher.check()
 
         self.assertTrue(res.ok)
-        self.assertEqual(res.missing_in_rates, [])
         self.assertEqual(res.missing_in_catalog, [])
+        self.assertEqual(res.missing_in_rates, ["other-unknown-model"])
         self.assertEqual(len(res.differences), 0)
 
     def test_price_mismatches_detected(self):

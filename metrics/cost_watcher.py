@@ -259,11 +259,46 @@ class CompositePriceSource(PriceSource):
         return merged
 
 
+PREFERRED_PROVIDERS = (
+    "anthropic/",
+    "gemini/",
+    "google/",
+    "openai/",
+    "azure_ai/",
+    "vertex_ai/",
+)
+
+
+def resolve_catalog_model_key(
+    model: str,
+    catalog: dict[str, Any],
+    direct_map: dict[str, str],
+    suffix_map: dict[str, list[str]],
+) -> str | None:
+    """rates.yaml のモデル名に対応するカタログキーを解決する (完全一致・正規化・プロバイダー接頭辞対応)"""
+    norm_m = normalize_identifier(model)
+    if norm_m in direct_map:
+        return direct_map[norm_m]
+
+    candidates = suffix_map.get(norm_m, [])
+    if not candidates:
+        return None
+
+    def sort_key(k: str) -> tuple[int, int, int, str]:
+        for idx, pref in enumerate(PREFERRED_PROVIDERS):
+            if k.startswith(pref):
+                return (0, idx, len(k), k)
+        return (1, 0, len(k), k)
+
+    candidates.sort(key=sort_key)
+    return candidates[0]
+
+
 class CostWatcher:
     """
     モデル単価監視チェッカー。
-    rates.yaml と公称価格カタログを突合し、単価の乖離やモデルの過不足を検出する。
-    モデル名の表記ゆれ（ハイフン/ドット等）は normalize_identifier で吸収する。
+    rates.yaml の各モデル単価と公称価格カタログを突合し、単価の乖離やモデルの消失を検出する。
+    モデル名の表記ゆれやプロバイダー接頭辞は自動解決する。
     """
 
     def __init__(
@@ -280,37 +315,26 @@ class CostWatcher:
 
     def check(self) -> CheckResult:
         differences: list[RateFieldDifference] = []
-        missing_in_rates: list[str] = []
         missing_in_catalog: list[str] = []
 
-        # 表記ゆれを吸収するための正規化マップを構築
-        # normalized_key -> original_key
-        rates_norm_map: dict[str, str] = {
-            normalize_identifier(k): k for k in self.rates
-        }
-        catalog_norm_map: dict[str, str] = {
-            normalize_identifier(k): k for k in self.catalog
-        }
+        direct_map = {normalize_identifier(k): k for k in self.catalog}
+        suffix_map: dict[str, list[str]] = {}
+        for k in self.catalog:
+            suffix = k.rsplit("/", 1)[-1].split(":", 1)[0]
+            norm_s = normalize_identifier(suffix)
+            suffix_map.setdefault(norm_s, []).append(k)
 
-        all_norm_keys = set(rates_norm_map.keys()) | set(catalog_norm_map.keys())
+        matched_catalog_keys: set[str] = set()
 
-        for norm_key in sorted(all_norm_keys):
-            in_rates = norm_key in rates_norm_map
-            in_catalog = norm_key in catalog_norm_map
-
-            if in_rates and not in_catalog:
-                missing_in_catalog.append(rates_norm_map[norm_key])
+        for model in sorted(self.rates.keys()):
+            cat_key = resolve_catalog_model_key(model, self.catalog, direct_map, suffix_map)
+            if not cat_key:
+                missing_in_catalog.append(model)
                 continue
 
-            if in_catalog and not in_rates:
-                missing_in_rates.append(catalog_norm_map[norm_key])
-                continue
-
-            orig_rates_key = rates_norm_map[norm_key]
-            orig_cat_key = catalog_norm_map[norm_key]
-
-            model_rates = self.rates[orig_rates_key]
-            model_catalog = self.catalog[orig_cat_key]
+            matched_catalog_keys.add(cat_key)
+            model_rates = self.rates[model]
+            model_catalog = self.catalog[cat_key]
 
             fields_to_check = set(model_rates.keys()) | set(model_catalog.keys())
             for fld in sorted(fields_to_check):
@@ -321,7 +345,7 @@ class CostWatcher:
                     # rates.yaml に項目が未定義
                     differences.append(
                         RateFieldDifference(
-                            model=orig_rates_key,
+                            model=model,
                             field=fld,
                             rates_value=None,
                             catalog_value=float(cat_val),
@@ -333,7 +357,7 @@ class CostWatcher:
                     # カタログ側に項目が未定義
                     differences.append(
                         RateFieldDifference(
-                            model=orig_rates_key,
+                            model=model,
                             field=fld,
                             rates_value=float(rate_val),
                             catalog_value=None,
@@ -346,7 +370,7 @@ class CostWatcher:
                     if abs(diff) > self.tolerance:
                         differences.append(
                             RateFieldDifference(
-                                model=orig_rates_key,
+                                model=model,
                                 field=fld,
                                 rates_value=float(rate_val),
                                 catalog_value=float(cat_val),
@@ -355,9 +379,17 @@ class CostWatcher:
                             )
                         )
 
-        # OK 判定: 単価乖離がなく、かつ rates 側の未定義モデル・未定義項目がないこと
-        # ignore_missing_in_catalog が真ならカタログ外モデルがあっても OK
-        is_ok = len([d for d in differences if d.status in ("mismatch", "missing_in_rates")]) == 0 and len(missing_in_rates) == 0
+        # カタログ側にのみ存在するモデル一覧（情報用）
+        missing_in_rates = [
+            k for k in sorted(self.catalog.keys()) if k not in matched_catalog_keys
+        ]
+
+        # OK 判定: 単価乖離がなく、かつ rates 側のモデルがカタログから消失していないこと
+        # (カタログ側にのみ存在する他社モデル missing_in_rates は不整合とみなさない)
+        mismatches = [d for d in differences if d.status == "mismatch"]
+        is_ok = len(mismatches) == 0
+        if any(d.status == "missing_in_rates" for d in differences):
+            is_ok = False
         if not self.ignore_missing_in_catalog:
             if len(missing_in_catalog) > 0 or any(d.status == "missing_in_catalog" for d in differences):
                 is_ok = False

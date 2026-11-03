@@ -193,7 +193,7 @@ in
 
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${pkgs.python3}/bin/python3 ${../metrics/collector.py} --rates-file /etc/autopilot5/rates.yaml";
+        ExecStart = "${pkgs.python3}/bin/python3 ${../metrics}/collector.py --rates-file /etc/autopilot5/rates.yaml";
       };
     };
 
@@ -224,7 +224,7 @@ in
 
           serviceConfig = {
             Type = "oneshot";
-            ExecStart = "${pkgs.python3}/bin/python3 ${../metrics/cost_watcher.py} --rates-file /etc/autopilot5/rates.yaml ${lib.optionalString cfg.metrics.costWatcher.online "--online"} --check";
+            ExecStart = "${pkgs.python3}/bin/python3 ${../metrics}/cost_watcher.py --rates-file /etc/autopilot5/rates.yaml ${lib.optionalString cfg.metrics.costWatcher.online "--online"} --check";
           };
         };
   };
