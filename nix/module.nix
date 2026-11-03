@@ -51,6 +51,16 @@ let
     cp ${cfg.models} $out
   '';
 
+  checkedRates =
+    pkgs.runCommand "autopilot5-rates.yaml"
+      {
+        nativeBuildInputs = [ pkgs.python3 ];
+      }
+      ''
+        python3 -c "import sys; sys.path.insert(0, '${../metrics}'); from collector import load_rates; load_rates('${cfg.metrics.ratesFile}')"
+        cp ${cfg.metrics.ratesFile} $out
+      '';
+
   # "a/b/c" → [ "a" "a/b" "a/b/c" ]。新しいホストでは途中のディレクトリも無い。
   ancestors =
     path:
@@ -123,8 +133,29 @@ in
       interval = lib.mkOption {
         type = lib.types.str;
         default = "*:0/1";
-        example = "*:0/1";
+        example = "*:0/5";
         description = "メトリクス収集を実行する systemd タイマー間隔 (OnCalendar)。";
+      };
+
+      costWatcher = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "モデル単価の乖離を定期的に監視する cost_watcher タイマーを有効化する。";
+        };
+
+        interval = lib.mkOption {
+          type = lib.types.str;
+          default = "daily";
+          example = "daily";
+          description = "単価監視を実行する systemd タイマー間隔 (OnCalendar)。";
+        };
+
+        online = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "外部の公称価格カタログ URL (LiteLLM 等) からフェッチして突合する。";
+        };
       };
     };
   };
@@ -135,7 +166,7 @@ in
       source = checkedModels;
     };
     environment.etc."autopilot5/rates.yaml" = lib.mkIf cfg.metrics.enable {
-      source = cfg.metrics.ratesFile;
+      source = checkedRates;
     };
     systemd.tmpfiles.rules = lib.concatMap rulesFor cfg.agents;
 
@@ -165,5 +196,36 @@ in
         ExecStart = "${pkgs.python3}/bin/python3 ${../metrics/collector.py} --rates-file /etc/autopilot5/rates.yaml";
       };
     };
+
+    systemd.user.timers.ai-agent-cost-watcher =
+      lib.mkIf (cfg.metrics.enable && cfg.metrics.costWatcher.enable)
+        {
+          description = "AI Agent モデル単価監視タイマー (cost-watcher)";
+          wantedBy = [ "timers.target" ];
+
+          unitConfig = {
+            ConditionUser = cfg.user;
+          };
+
+          timerConfig = {
+            OnCalendar = cfg.metrics.costWatcher.interval;
+            Persistent = true;
+          };
+        };
+
+    systemd.user.services.ai-agent-cost-watcher =
+      lib.mkIf (cfg.metrics.enable && cfg.metrics.costWatcher.enable)
+        {
+          description = "AI Agent モデル単価乖離監視チェッカー";
+
+          unitConfig = {
+            ConditionUser = cfg.user;
+          };
+
+          serviceConfig = {
+            Type = "oneshot";
+            ExecStart = "${pkgs.python3}/bin/python3 ${../metrics/cost_watcher.py} --rates-file /etc/autopilot5/rates.yaml ${lib.optionalString cfg.metrics.costWatcher.online "--online"} --check";
+          };
+        };
   };
 }

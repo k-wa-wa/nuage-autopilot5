@@ -1945,6 +1945,31 @@ class TestMetricsCollector(unittest.TestCase):
             mock_def.assert_not_called()
             self.assertEqual(collector_explicit.rates_file, custom_rates_path)
 
+    def test_default_rates_file_resolution(self):
+        # 1. 環境変数が指定されている場合
+        with mock.patch.dict(os.environ, {"AUTOPILOT_RATES": "/custom/env/rates.yaml"}):
+            self.assertEqual(collector_mod.default_rates_file(), "/custom/env/rates.yaml")
+
+        # 2. /etc/autopilot5/rates.yaml が存在する場合
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch("os.path.exists") as mock_exists:
+                mock_exists.side_effect = lambda p: p == "/etc/autopilot5/rates.yaml"
+                self.assertEqual(collector_mod.default_rates_file(), "/etc/autopilot5/rates.yaml")
+
+        # 3. /etc がなく、リポジトリ同梱 rates.yaml が存在する場合
+        local_path = os.path.normpath(
+            os.path.join(os.path.dirname(collector_mod.__file__), "rates.yaml")
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch("os.path.exists") as mock_exists:
+                mock_exists.side_effect = lambda p: p == local_path
+                self.assertEqual(collector_mod.default_rates_file(), local_path)
+
+        # 4. 何も存在しない場合
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch("os.path.exists", return_value=False):
+                self.assertEqual(collector_mod.default_rates_file(), "/etc/autopilot5/rates.yaml")
+
     def test_normalize_autopilot_phase_and_terminal_status(self):
         # 各 status 表記からの phase 正規化検証
         self.assertEqual(normalize_autopilot_phase("implementing (agy)"), "implementing")

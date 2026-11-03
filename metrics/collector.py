@@ -704,7 +704,7 @@ _LOGGED_DEV_RATES_FALLBACK = False
 
 
 def default_rates_file() -> str:
-    """利用可能な既定の単価定義ファイルパスを判定 ($AUTOPILOT_RATES -> /etc/autopilot5/rates.yaml -> リポジトリ内の rates.yaml)"""
+    """利用可能な既定の単価定義ファイルパスを判定 ($AUTOPILOT_RATES -> /etc/autopilot5/rates.yaml -> リポジトリ同梱の rates.yaml)"""
     global _LOGGED_DEV_RATES_FALLBACK
     env_path = os.environ.get("AUTOPILOT_RATES")
     if env_path:
@@ -723,17 +723,6 @@ def default_rates_file() -> str:
                 file=sys.stderr,
             )
         return local_path
-    repo_path = os.path.normpath(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "nix", "hosts", "atelier", "rates.yaml")
-    )
-    if os.path.exists(repo_path):
-        if not _LOGGED_DEV_RATES_FALLBACK:
-            _LOGGED_DEV_RATES_FALLBACK = True
-            print(
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 情報: {etc_path} が存在しないため、開発用の単価定義を使用する: {repo_path}",
-                file=sys.stderr,
-            )
-        return repo_path
     return etc_path
 
 

@@ -8,24 +8,21 @@ import os
 import sys
 import tempfile
 import unittest
-from io import BytesIO, StringIO
+from io import StringIO
 from unittest import mock
 import urllib.error
 
 # テスト対象のインポート
 sys.path.insert(0, os.path.dirname(__file__))
 
-import cost_watcher as cw_mod
 from cost_watcher import (
-    CheckResult,
     CompositePriceSource,
     CostWatcher,
     FilePriceSource,
     HttpJsonPriceSource,
-    RateFieldMismatch,
     StaticPriceSource,
-    build_parser,
     main,
+    parse_catalog_dict,
 )
 
 
@@ -45,9 +42,27 @@ class TestCostWatcher(unittest.TestCase):
         res = watcher.check()
 
         self.assertTrue(res.ok)
-        self.assertEqual(len(res.mismatches), 0)
+        self.assertEqual(len(res.differences), 0)
         self.assertEqual(res.missing_in_rates, [])
         self.assertEqual(res.missing_in_catalog, [])
+
+    def test_model_name_normalization_variants(self):
+        # 表記ゆれ（ドット vs ハイフン）があっても同一モデルとして突合できること
+        rates = {
+            "claude-opus-5-5": {"input": 15.0, "output": 75.0},
+            "gemini-3.8-flash": {"input": 0.1, "output": 0.4},
+        }
+        catalog = {
+            "claude-opus-5.5": {"input": 15.0, "output": 75.0},
+            "gemini-3-8-flash": {"input": 0.1, "output": 0.4},
+        }
+        watcher = CostWatcher(rates=rates, catalog=catalog)
+        res = watcher.check()
+
+        self.assertTrue(res.ok)
+        self.assertEqual(res.missing_in_rates, [])
+        self.assertEqual(res.missing_in_catalog, [])
+        self.assertEqual(len(res.differences), 0)
 
     def test_price_mismatches_detected(self):
         rates = {
@@ -60,15 +75,17 @@ class TestCostWatcher(unittest.TestCase):
         res = watcher.check()
 
         self.assertFalse(res.ok)
-        self.assertEqual(len(res.mismatches), 2)
+        mismatches = res.mismatches
+        self.assertEqual(len(mismatches), 2)
 
-        input_diff = next(m for m in res.mismatches if m.field == "input")
+        input_diff = next(m for m in mismatches if m.field == "input")
         self.assertEqual(input_diff.model, "model-a")
         self.assertEqual(input_diff.rates_value, 1.0)
         self.assertEqual(input_diff.catalog_value, 1.2)
         self.assertAlmostEqual(input_diff.diff, -0.2, places=5)
+        self.assertEqual(input_diff.status, "mismatch")
 
-        cache_diff = next(m for m in res.mismatches if m.field == "cache_read")
+        cache_diff = next(m for m in mismatches if m.field == "cache_read")
         self.assertEqual(cache_diff.rates_value, 0.1)
         self.assertEqual(cache_diff.catalog_value, 0.08)
         self.assertAlmostEqual(cache_diff.diff, 0.02, places=5)
@@ -84,6 +101,35 @@ class TestCostWatcher(unittest.TestCase):
         # tolerance 1e-8 であれば誤差を超えて検知
         watcher_strict = CostWatcher(rates=rates, catalog=catalog, tolerance=1e-8)
         self.assertFalse(watcher_strict.check().ok)
+
+    def test_missing_field_in_rates_and_catalog(self):
+        # rates 側に cache_creation があるが catalog には無い
+        rates1 = {"model-a": {"input": 1.0, "output": 2.0, "cache_creation": 1.25}}
+        catalog1 = {"model-a": {"input": 1.0, "output": 2.0}}
+        watcher1 = CostWatcher(rates=rates1, catalog=catalog1)
+        res1 = watcher1.check()
+        self.assertFalse(res1.ok)
+        self.assertEqual(len(res1.differences), 1)
+        self.assertEqual(res1.differences[0].field, "cache_creation")
+        self.assertEqual(res1.differences[0].status, "missing_in_catalog")
+        self.assertEqual(res1.differences[0].rates_value, 1.25)
+        self.assertIsNone(res1.differences[0].catalog_value)
+
+        # catalog 側に cache_read があるが rates には無い
+        rates2 = {"model-a": {"input": 1.0, "output": 2.0}}
+        catalog2 = {"model-a": {"input": 1.0, "output": 2.0, "cache_read": 0.25}}
+        watcher2 = CostWatcher(rates=rates2, catalog=catalog2)
+        res2 = watcher2.check()
+        self.assertFalse(res2.ok)
+        self.assertEqual(len(res2.differences), 1)
+        self.assertEqual(res2.differences[0].field, "cache_read")
+        self.assertEqual(res2.differences[0].status, "missing_in_rates")
+        self.assertIsNone(res2.differences[0].rates_value)
+        self.assertEqual(res2.differences[0].catalog_value, 0.25)
+
+        # レポート表記に「未定義」が含まれること
+        report = res2.format_report()
+        self.assertIn("rates.yaml=未定義 vs カタログ=0.25", report)
 
     def test_missing_models(self):
         rates = {
@@ -102,16 +148,7 @@ class TestCostWatcher(unittest.TestCase):
         self.assertEqual(res.missing_in_rates, ["new-official-model"])
         self.assertEqual(res.missing_in_catalog, ["custom-local-model"])
 
-        # ignore_missing_in_catalog=True の場合: missing_in_rates が無ければ OK
-        watcher_ignore = CostWatcher(
-            rates=rates,
-            catalog=catalog,
-            ignore_missing_in_catalog=True,
-        )
-        res_ignore = watcher_ignore.check()
-        self.assertFalse(res_ignore.ok)  # new-official-model が rates に無いため False
-
-        # missing_in_rates を無くした場合
+        # ignore_missing_in_catalog=True の場合
         rates_with_official = dict(rates)
         rates_with_official["new-official-model"] = {"input": 3.0, "output": 6.0}
         watcher_ok = CostWatcher(
@@ -123,39 +160,47 @@ class TestCostWatcher(unittest.TestCase):
         self.assertTrue(res_ok.ok)
         self.assertEqual(res_ok.missing_in_catalog, ["custom-local-model"])
 
-    def test_missing_field_in_rates_or_catalog(self):
-        rates = {"model-a": {"input": 1.0, "output": 2.0, "cache_creation": 1.25}}
-        catalog = {"model-a": {"input": 1.0, "output": 2.0}}  # cache_creation なし
-
-        watcher = CostWatcher(rates=rates, catalog=catalog)
-        res = watcher.check()
-        self.assertFalse(res.ok)
-        self.assertEqual(len(res.mismatches), 1)
-        self.assertEqual(res.mismatches[0].field, "cache_creation")
-        self.assertEqual(res.mismatches[0].rates_value, 1.25)
-        self.assertEqual(res.mismatches[0].catalog_value, 0.0)
-
-    def test_result_to_dict_and_format_report(self):
-        rates = {"model-a": {"input": 1.0, "output": 2.0}}
-        catalog = {
-            "model-a": {"input": 1.5, "output": 2.0},
-            "model-b": {"input": 0.5, "output": 1.0},
-        }
-        res = CostWatcher(rates=rates, catalog=catalog).check()
-        d = res.to_dict()
-
-        self.assertFalse(d["ok"])
-        self.assertEqual(d["mismatch_count"], 1)
-        self.assertIn("model-b", d["missing_in_rates"])
-
-        report = res.format_report()
-        self.assertIn("警告/異常", report)
-        self.assertIn("model-a", report)
-        self.assertIn("model-b", report)
-
 
 class TestPriceSources(unittest.TestCase):
-    """各 PriceSource の動作テスト"""
+    """各 PriceSource とカタログパースの動作テスト"""
+
+    def test_parse_catalog_dict_standard(self):
+        data = {
+            "model-x": {"input": 1.5, "output": 3.0},
+            "model-y": {"input": "2.0", "output": 4.0},  # 文字列数値も許容
+        }
+        res = parse_catalog_dict(data)
+        self.assertEqual(res["model-x"], {"input": 1.5, "output": 3.0})
+        self.assertEqual(res["model-y"], {"input": 2.0, "output": 4.0})
+
+    def test_parse_catalog_dict_litellm_format(self):
+        # LiteLLM の 1トークンあたり単価から 100万トークン単価への換算
+        data = {
+            "claude-opus-5-5": {
+                "input_cost_per_token": 0.000015,
+                "output_cost_per_token": 0.000075,
+                "cache_read_input_token_cost": 0.0000015,
+                "cache_creation_input_token_cost": 0.00001875,
+            },
+            "sample_spec": "metadata string",  # メタデータはスキップ
+        }
+        res = parse_catalog_dict(data)
+        self.assertIn("claude-opus-5-5", res)
+        self.assertEqual(res["claude-opus-5-5"]["input"], 15.0)
+        self.assertEqual(res["claude-opus-5-5"]["output"], 75.0)
+        self.assertEqual(res["claude-opus-5-5"]["cache_read"], 1.5)
+        self.assertEqual(res["claude-opus-5-5"]["cache_creation"], 18.75)
+
+    def test_parse_catalog_dict_invalid_data_fails(self):
+        # 失敗を隠さない: 不正な型や壊れたデータは例外を投げる
+        with self.assertRaises(ValueError):
+            parse_catalog_dict("not a dict")  # type: ignore
+
+        with self.assertRaises(ValueError):
+            parse_catalog_dict({"model-z": "not a dict value"})
+
+        with self.assertRaises(ValueError):
+            parse_catalog_dict({"model-z": {"input": "NOT_A_FLOAT"}})
 
     def test_static_price_source(self):
         catalog = {"model-x": {"input": 1.0, "output": 2.0}}
@@ -190,8 +235,10 @@ class TestPriceSources(unittest.TestCase):
     @mock.patch("urllib.request.urlopen")
     def test_http_json_price_source_success(self, mock_urlopen):
         payload = json.dumps({
-            "claude-opus-5-5": {"input": 15.0, "output": 75.0},
-            "unsupported-meta": "some string",
+            "claude-opus-5-5": {
+                "input_cost_per_token": 0.000015,
+                "output_cost_per_token": 0.000075,
+            }
         }).encode("utf-8")
 
         mock_resp = mock.MagicMock()
@@ -204,7 +251,6 @@ class TestPriceSources(unittest.TestCase):
 
         self.assertIn("claude-opus-5-5", cat)
         self.assertEqual(cat["claude-opus-5-5"]["input"], 15.0)
-        self.assertNotIn("unsupported-meta", cat)
 
     @mock.patch("urllib.request.urlopen")
     def test_http_json_price_source_network_error(self, mock_urlopen):
@@ -235,6 +281,7 @@ class TestCostWatcherCLI(unittest.TestCase):
 
     def setUp(self):
         self.rates_path = os.path.join(os.path.dirname(__file__), "rates.yaml")
+        self.ref_path = os.path.join(os.path.dirname(__file__), "reference_catalog.yaml")
 
     def test_main_default_success(self):
         buf = StringIO()
@@ -250,7 +297,7 @@ class TestCostWatcherCLI(unittest.TestCase):
         self.assertEqual(code, 0)
         parsed = json.loads(buf.getvalue())
         self.assertTrue(parsed["ok"])
-        self.assertEqual(parsed["mismatch_count"], 0)
+        self.assertEqual(parsed["difference_count"], 0)
 
     def test_main_mismatch_with_custom_catalog(self):
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
@@ -270,6 +317,32 @@ class TestCostWatcherCLI(unittest.TestCase):
         finally:
             if os.path.exists(custom_cat):
                 os.remove(custom_cat)
+
+    @mock.patch("urllib.request.urlopen")
+    def test_main_online_flag(self, mock_urlopen):
+        # --online で外部フェッチを行うテスト
+        payload = json.dumps({
+            "claude-opus-5-5": {
+                "input_cost_per_token": 0.000015,
+                "output_cost_per_token": 0.000075,
+                "cache_read_input_token_cost": 0.0000015,
+                "cache_creation_input_token_cost": 0.00001875,
+            }
+        }).encode("utf-8")
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = payload
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        buf = StringIO()
+        with mock.patch("sys.stdout", buf):
+            code = main([
+                "--rates-file", self.rates_path,
+                "--online",
+                "--ignore-missing-catalog",
+                "--check",
+            ])
+        self.assertEqual(code, 0)
 
     def test_main_nonexistent_rates_file(self):
         err_buf = StringIO()

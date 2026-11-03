@@ -3,7 +3,7 @@
 AI Agent モデル単価監視スクリプト (cost_watcher)。
 
 rates.yaml に定義された各モデルの単価 (input, output, cache_read, cache_creation)
-を最新の公称価格カタログ（参照定義、ローカルファイル、または外部API/URL）と突合し、
+を最新の公称価格カタログ（参照定義ファイル、または外部API/URL）と突合し、
 単価の乖離、未登録モデル、カタログ外モデルを検出・報告する。
 """
 
@@ -13,77 +13,44 @@ import argparse
 from dataclasses import dataclass, field
 import json
 import os
-import re
 import sys
-import time
 import urllib.error
 import urllib.request
 from typing import Any
 
-# collector.py から rates パーサーとローダーをインポート
+# collector.py から共通の rates パーサーと正規化関数をインポート
 _DIR = os.path.dirname(os.path.abspath(__file__))
 if _DIR not in sys.path:
     sys.path.insert(0, _DIR)
 
 try:
-    from collector import default_rates_file, load_rates, parse_rates_yaml
+    from collector import default_rates_file, load_rates, normalize_identifier, parse_rates_yaml
 except ImportError:
-    from metrics.collector import default_rates_file, load_rates, parse_rates_yaml
+    from metrics.collector import default_rates_file, load_rates, normalize_identifier, parse_rates_yaml
 
-
-# 各社公称価格のベースライン参照カタログ（USD / 100万トークン）
-# 外部通信が行えない環境（nix flake check、オフライン時）でも突合可能にする。
-REFERENCE_OFFICIAL_CATALOG: dict[str, dict[str, float]] = {
-    # Anthropic
-    "claude-opus-5-5": {
-        "input": 15.00,
-        "output": 75.00,
-        "cache_read": 1.50,
-        "cache_creation": 18.75,
-    },
-    "claude-sonnet-5-5": {
-        "input": 3.00,
-        "output": 15.00,
-        "cache_read": 0.30,
-        "cache_creation": 3.75,
-    },
-    "claude-haiku-5-5": {
-        "input": 0.80,
-        "output": 4.00,
-        "cache_read": 0.08,
-        "cache_creation": 1.00,
-    },
-    # Google
-    "gemini-3.8-flash": {
-        "input": 0.10,
-        "output": 0.40,
-        "cache_read": 0.025,
-    },
-    "gemini-4-argon": {
-        "input": 2.00,
-        "output": 8.00,
-        "cache_read": 0.50,
-    },
-    # OpenAI / Open-weights
-    "gpt-oss-120b": {
-        "input": 0.15,
-        "output": 0.60,
-        "cache_read": 0.03,
-    },
-}
+# 業界標準で各社公称価格を常時トラッキングしているオープンソースのカタログエンドポイント
+DEFAULT_LITELLM_CATALOG_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+)
 
 SUPPORTED_RATE_FIELDS = ("input", "output", "cache_read", "cache_creation")
 
 
+def default_reference_catalog_file() -> str:
+    """リポジトリ同梱の公称価格参照カタログ (reference_catalog.yaml) のパスを解決"""
+    return os.path.normpath(os.path.join(_DIR, "reference_catalog.yaml"))
+
+
 @dataclass
-class RateFieldMismatch:
-    """単価項目の不一致"""
+class RateFieldDifference:
+    """単価項目ごとの差分または未定義情報"""
 
     model: str
     field: str
-    rates_value: float
-    catalog_value: float
-    diff: float
+    rates_value: float | None
+    catalog_value: float | None
+    diff: float | None
+    status: str  # "mismatch" | "missing_in_rates" | "missing_in_catalog"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,7 +58,8 @@ class RateFieldMismatch:
             "field": self.field,
             "rates_value": self.rates_value,
             "catalog_value": self.catalog_value,
-            "diff": round(self.diff, 6),
+            "diff": round(self.diff, 6) if self.diff is not None else None,
+            "status": self.status,
         }
 
 
@@ -100,15 +68,19 @@ class CheckResult:
     """突合検証結果"""
 
     ok: bool
-    mismatches: list[RateFieldMismatch] = field(default_factory=list)
+    differences: list[RateFieldDifference] = field(default_factory=list)
     missing_in_rates: list[str] = field(default_factory=list)
     missing_in_catalog: list[str] = field(default_factory=list)
+
+    @property
+    def mismatches(self) -> list[RateFieldDifference]:
+        return [d for d in self.differences if d.status == "mismatch"]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "ok": self.ok,
-            "mismatch_count": len(self.mismatches),
-            "mismatches": [m.to_dict() for m in self.mismatches],
+            "difference_count": len(self.differences),
+            "differences": [d.to_dict() for d in self.differences],
             "missing_in_rates": self.missing_in_rates,
             "missing_in_catalog": self.missing_in_catalog,
         }
@@ -116,16 +88,25 @@ class CheckResult:
     def format_report(self) -> str:
         lines: list[str] = []
         if self.ok:
-            lines.append("【単価検証結果】: 正常 - すべての単価定義が公称カタログと一致しています。")
+            lines.append("【単価検証結果】: 正常 - すべての単価定義が公称カタログと整合しています。")
         else:
             lines.append("【単価検証結果】: 警告/異常 - 単価の乖離または不整合が検出されました。")
 
-        if self.mismatches:
-            lines.append(f"\n■ 単価乖離 ({len(self.mismatches)} 件):")
-            for m in self.mismatches:
+        mismatches = self.mismatches
+        if mismatches:
+            lines.append(f"\n■ 単価乖離 ({len(mismatches)} 件):")
+            for m in mismatches:
                 lines.append(
                     f"  - [{m.model}] {m.field}: rates.yaml={m.rates_value} vs カタログ={m.catalog_value} (差分: {m.diff:+.6f})"
                 )
+
+        field_missing = [d for d in self.differences if d.status != "mismatch"]
+        if field_missing:
+            lines.append(f"\n■ 項目過不足 ({len(field_missing)} 件):")
+            for d in field_missing:
+                r_str = f"{d.rates_value}" if d.rates_value is not None else "未定義"
+                c_str = f"{d.catalog_value}" if d.catalog_value is not None else "未定義"
+                lines.append(f"  - [{d.model}] {d.field}: rates.yaml={r_str} vs カタログ={c_str}")
 
         if self.missing_in_rates:
             lines.append(f"\n■ rates.yaml 未定義モデル (カタログに存在): {len(self.missing_in_rates)} 件")
@@ -138,6 +119,68 @@ class CheckResult:
                 lines.append(f"  - {model}")
 
         return "\n".join(lines)
+
+
+def parse_catalog_dict(data: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """
+    カタログ辞書をパースし、{model_name: {input: ..., output: ...}} 形式に正規化する。
+    標準形式 ({model: {input: ...}}) および LiteLLM 形式 ({model: {input_cost_per_token: ...}}) の両方に対応。
+    不正な値が含まれる場合はエラー（ValueError）とする（失敗を隠さない）。
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"カタログデータは dict である必要があるが、{type(data).__name__} が渡された")
+
+    # LiteLLM 形式かどうかの判定（要素内に input_cost_per_token があるか）
+    is_litellm = any(
+        isinstance(v, dict) and "input_cost_per_token" in v for v in data.values()
+    )
+
+    result: dict[str, dict[str, float]] = {}
+
+    for model_key, model_val in data.items():
+        if not isinstance(model_val, dict):
+            # LiteLLM などのカタログメタデータキー (例: "sample_spec": "...") は無視
+            if is_litellm:
+                continue
+            raise ValueError(f"モデル '{model_key}' の価格データが dict ではない: {model_val!r}")
+
+        rates: dict[str, float] = {}
+
+        if is_litellm:
+            in_cost = model_val.get("input_cost_per_token")
+            out_cost = model_val.get("output_cost_per_token")
+            if in_cost is None and out_cost is None:
+                continue
+
+            try:
+                if in_cost is not None:
+                    rates["input"] = round(float(in_cost) * 1_000_000, 6)
+                if out_cost is not None:
+                    rates["output"] = round(float(out_cost) * 1_000_000, 6)
+                cache_r = model_val.get("cache_read_input_token_cost")
+                if cache_r is not None:
+                    rates["cache_read"] = round(float(cache_r) * 1_000_000, 6)
+                cache_c = model_val.get("cache_creation_input_token_cost")
+                if cache_c is not None:
+                    rates["cache_creation"] = round(float(cache_c) * 1_000_000, 6)
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"モデル '{model_key}' のトークン単価変換に失敗: {e}") from e
+        else:
+            for fld, val in model_val.items():
+                if fld not in SUPPORTED_RATE_FIELDS:
+                    continue
+                try:
+                    rates[fld] = float(val)
+                except (ValueError, TypeError) as e:
+                    raise ValueError(f"モデル '{model_key}' のフィールド '{fld}' の値が数値ではない: {val!r}") from e
+
+        if rates:
+            result[model_key] = rates
+
+    if not result:
+        raise ValueError("カタログから有効なモデル単価を1件も取得できなかった")
+
+    return result
 
 
 class PriceSource:
@@ -172,12 +215,9 @@ class FilePriceSource(PriceSource):
 
         if self.path.endswith(".json"):
             data = json.loads(content)
-            result: dict[str, dict[str, float]] = {}
-            for model, rates in data.items():
-                result[model] = {k: float(v) for k, v in rates.items()}
-            return result
+            return parse_catalog_dict(data)
 
-        # YAML のパース（collector の parse_rates_yaml を使用）
+        # YAML のパース
         return parse_rates_yaml(content)
 
 
@@ -199,16 +239,7 @@ class HttpJsonPriceSource(PriceSource):
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             raise RuntimeError(f"外部価格カタログのフェッチに失敗 ({self.url}): {e}") from e
 
-        # 構造を正規化して返す
-        result: dict[str, dict[str, float]] = {}
-        for model, rates in data.items():
-            if isinstance(rates, dict):
-                result[model] = {
-                    k: float(v)
-                    for k, v in rates.items()
-                    if k in SUPPORTED_RATE_FIELDS and isinstance(v, (int, float))
-                }
-        return result
+        return parse_catalog_dict(data)
 
 
 class CompositePriceSource(PriceSource):
@@ -232,6 +263,7 @@ class CostWatcher:
     """
     モデル単価監視チェッカー。
     rates.yaml と公称価格カタログを突合し、単価の乖離やモデルの過不足を検出する。
+    モデル名の表記ゆれ（ハイフン/ドット等）は normalize_identifier で吸収する。
     """
 
     def __init__(
@@ -247,82 +279,92 @@ class CostWatcher:
         self.ignore_missing_in_catalog = ignore_missing_in_catalog
 
     def check(self) -> CheckResult:
-        mismatches: list[RateFieldMismatch] = []
+        differences: list[RateFieldDifference] = []
         missing_in_rates: list[str] = []
         missing_in_catalog: list[str] = []
 
-        all_models = set(self.rates.keys()) | set(self.catalog.keys())
+        # 表記ゆれを吸収するための正規化マップを構築
+        # normalized_key -> original_key
+        rates_norm_map: dict[str, str] = {
+            normalize_identifier(k): k for k in self.rates
+        }
+        catalog_norm_map: dict[str, str] = {
+            normalize_identifier(k): k for k in self.catalog
+        }
 
-        for model in sorted(all_models):
-            in_rates = model in self.rates
-            in_catalog = model in self.catalog
+        all_norm_keys = set(rates_norm_map.keys()) | set(catalog_norm_map.keys())
+
+        for norm_key in sorted(all_norm_keys):
+            in_rates = norm_key in rates_norm_map
+            in_catalog = norm_key in catalog_norm_map
 
             if in_rates and not in_catalog:
-                missing_in_catalog.append(model)
+                missing_in_catalog.append(rates_norm_map[norm_key])
                 continue
 
             if in_catalog and not in_rates:
-                missing_in_rates.append(model)
+                missing_in_rates.append(catalog_norm_map[norm_key])
                 continue
 
-            # 両方に存在する場合: 各フィールドの単価突合
-            model_rates = self.rates[model]
-            model_catalog = self.catalog[model]
+            orig_rates_key = rates_norm_map[norm_key]
+            orig_cat_key = catalog_norm_map[norm_key]
+
+            model_rates = self.rates[orig_rates_key]
+            model_catalog = self.catalog[orig_cat_key]
 
             fields_to_check = set(model_rates.keys()) | set(model_catalog.keys())
             for fld in sorted(fields_to_check):
-                # どちらか一方にしか存在しないフィールド
                 rate_val = model_rates.get(fld)
                 cat_val = model_catalog.get(fld)
 
                 if rate_val is None:
-                    # rates.yaml にフィールドが無い
-                    diff = float(cat_val) - 0.0
-                    if abs(diff) > self.tolerance:
-                        mismatches.append(
-                            RateFieldMismatch(
-                                model=model,
-                                field=fld,
-                                rates_value=0.0,
-                                catalog_value=float(cat_val),
-                                diff=-diff,
-                            )
+                    # rates.yaml に項目が未定義
+                    differences.append(
+                        RateFieldDifference(
+                            model=orig_rates_key,
+                            field=fld,
+                            rates_value=None,
+                            catalog_value=float(cat_val),
+                            diff=None,
+                            status="missing_in_rates",
                         )
+                    )
                 elif cat_val is None:
-                    # catalog 側にフィールドが無い場合（例: cache_creation 未定義）
-                    diff = float(rate_val) - 0.0
-                    if abs(diff) > self.tolerance:
-                        mismatches.append(
-                            RateFieldMismatch(
-                                model=model,
-                                field=fld,
-                                rates_value=float(rate_val),
-                                catalog_value=0.0,
-                                diff=diff,
-                            )
+                    # カタログ側に項目が未定義
+                    differences.append(
+                        RateFieldDifference(
+                            model=orig_rates_key,
+                            field=fld,
+                            rates_value=float(rate_val),
+                            catalog_value=None,
+                            diff=None,
+                            status="missing_in_catalog",
                         )
+                    )
                 else:
                     diff = float(rate_val) - float(cat_val)
                     if abs(diff) > self.tolerance:
-                        mismatches.append(
-                            RateFieldMismatch(
-                                model=model,
+                        differences.append(
+                            RateFieldDifference(
+                                model=orig_rates_key,
                                 field=fld,
                                 rates_value=float(rate_val),
                                 catalog_value=float(cat_val),
                                 diff=diff,
+                                status="mismatch",
                             )
                         )
 
-        # OK 判定: 単価乖離がなく、かつ rates 側の未登録がないこと
+        # OK 判定: 単価乖離がなく、かつ rates 側の未定義モデル・未定義項目がないこと
         # ignore_missing_in_catalog が真ならカタログ外モデルがあっても OK
-        is_ok = len(mismatches) == 0 and len(missing_in_rates) == 0
-        if not self.ignore_missing_in_catalog and len(missing_in_catalog) > 0:
-            is_ok = False
+        is_ok = len([d for d in differences if d.status in ("mismatch", "missing_in_rates")]) == 0 and len(missing_in_rates) == 0
+        if not self.ignore_missing_in_catalog:
+            if len(missing_in_catalog) > 0 or any(d.status == "missing_in_catalog" for d in differences):
+                is_ok = False
 
         return CheckResult(
             ok=is_ok,
-            mismatches=mismatches,
+            differences=differences,
             missing_in_rates=missing_in_rates,
             missing_in_catalog=missing_in_catalog,
         )
@@ -340,12 +382,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--catalog-file",
         default=None,
-        help="突合する公称価格ファイルパス (YAML または JSON)",
+        help="突合する公称価格ファイルパス (YAML または JSON。未指定時は reference_catalog.yaml)",
     )
     parser.add_argument(
         "--catalog-url",
         default=None,
         help="突合する公称価格の外部 JSON URL",
+    )
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        help="外部の公称価格カタログ URL (LiteLLM 等) からフェッチして突合する",
     )
     parser.add_argument(
         "--tolerance",
@@ -384,15 +431,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # カタログソースの構築
-    sources: list[PriceSource] = [StaticPriceSource(REFERENCE_OFFICIAL_CATALOG)]
+    sources: list[PriceSource] = []
 
     if args.catalog_file:
         sources.append(FilePriceSource(args.catalog_file))
+    elif not args.online and not args.catalog_url:
+        ref_file = default_reference_catalog_file()
+        if os.path.exists(ref_file):
+            sources.append(FilePriceSource(ref_file))
 
-    if args.catalog_url:
+    if args.online:
+        url = args.catalog_url or DEFAULT_LITELLM_CATALOG_URL
+        sources.append(HttpJsonPriceSource(url))
+    elif args.catalog_url:
         sources.append(HttpJsonPriceSource(args.catalog_url))
 
-    catalog_source = CompositePriceSource(sources)
+    if not sources:
+        print("エラー: 突合対象の価格カタログが指定されておらず、既定の参照カタログも見つかりません", file=sys.stderr)
+        return 1
+
+    catalog_source = CompositePriceSource(sources) if len(sources) > 1 else sources[0]
     try:
         catalog = catalog_source.fetch_catalog()
     except Exception as e:
