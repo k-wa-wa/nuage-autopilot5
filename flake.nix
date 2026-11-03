@@ -21,6 +21,31 @@
         packages.autopilot-run = pkgs.callPackage ./nix/package.nix { };
         packages.default = self.packages.${system}.autopilot-run;
 
+        checks = {
+          metrics-collector =
+            pkgs.runCommand "autopilot5-test-metrics-collector"
+              {
+                nativeBuildInputs = [ pkgs.python3 ];
+              }
+              ''
+                cp -r ${./metrics} ./metrics
+                cd metrics
+                python3 -m unittest test_collector.py
+                touch $out
+              '';
+          cost-watcher =
+            pkgs.runCommand "autopilot5-test-cost-watcher"
+              {
+                nativeBuildInputs = [ pkgs.python3 ];
+              }
+              ''
+                cp -r ${./metrics} ./metrics
+                cd metrics
+                python3 -m unittest test_cost_watcher.py
+                touch $out
+              '';
+        };
+
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.bun

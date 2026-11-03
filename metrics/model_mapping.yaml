@@ -1,0 +1,10 @@
+# rates.yaml モデルと公称価格カタログ (LiteLLM 等) キーの明示的マッピング
+#
+# 接頭辞なしのモデルは公式/直接キーと突合。
+# 複数プロバイダーで提供されているモデルは、基準とするプロバイダーキーを明示する。
+claude-opus-5-5: claude-opus-5-5
+claude-sonnet-5-5: claude-sonnet-5-5
+claude-haiku-5-5: claude-haiku-5-5
+gemini-3.8-flash: gemini-3.8-flash
+gemini-4-argon: gemini/gemini-4-argon
+gpt-oss-120b: azure_ai/gpt-oss-120b
