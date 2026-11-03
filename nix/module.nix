@@ -111,7 +111,15 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ cfg.package ];
+    # atelier サーバー上のエージェントが叩く gh が安全ラッパーを経由するように高優先度で配備
+    environment.systemPackages = [ (lib.hiPrio cfg.package) ];
+
+    # 全リポジトリに効くシステム Git 設定（core.hooksPath）
+    programs.git = {
+      enable = lib.mkDefault true;
+      config.core.hooksPath = "${cfg.package}/share/autopilot5/hooks";
+    };
+
     environment.etc."autopilot5/models.yaml" = lib.mkIf (cfg.models != null) {
       source = checkedModels;
     };

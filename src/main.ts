@@ -42,12 +42,14 @@ import {
   type ModelTable,
 } from "./models.ts";
 import { formatOutcome, runPipeline, START_POINTS, type StartPoint } from "./pipeline.ts";
+import { ensureGitHooks, runPreCommit, runSafeGh } from "./shield.ts";
 import { STATE_DIR, State } from "./state.ts";
 
 const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--level LEVEL] [--max-rounds N] [--local] [--from FROM]
        autopilot-run status
        autopilot-run stop
        autopilot-run models [--file PATH]
+       autopilot-run shield [pre-commit | gh <args...>]
 
   AGENT        ${AGENTS.join(" | ")}（既定: claude）。
                モデルは models.yaml の並びを使う。決め打ちするときは AGENT:MODEL@EFFORT/MODEL と書く（/ の順に試す）
@@ -146,6 +148,18 @@ export async function parseStartOptions(
 }
 
 async function main(argv: string[]): Promise<number> {
+  // shield サブコマンド（pre-commit フック / safe-gh ラッパー）は任意の gh 引数を通すため先に受ける
+  if (argv[0] === "shield") {
+    const sub = argv[1];
+    if (sub === "pre-commit") {
+      return await runPreCommit();
+    }
+    if (sub === "gh") {
+      return await runSafeGh(argv.slice(2));
+    }
+    throw new UsageError("usage: autopilot-run shield [pre-commit | gh <args...>]");
+  }
+
   const { values, positionals } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -233,6 +247,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   await excludeStateDir(root);
+  await ensureGitHooks(await gitCommonDir(root));
   writeFileSync(state.file("run.pid"), String(process.pid));
   // 前回の要約を窓口が読み違えないよう、始める前に消す。
   rmSync(state.file("result.md"), { force: true });

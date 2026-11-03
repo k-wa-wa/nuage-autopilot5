@@ -5,7 +5,7 @@
 
 const RULES = `あなたは自律実行の担当である。人間は不在なので質問しない。
 迷ったら妥当な方を選び、判断と理由を .autopilot/decisions.md に追記する。
-禁止: PR のマージ、Issue・PR のクローズ、既定ブランチへの push、.autopilot/ のコミット。`;
+禁止: PR のマージ、Issue・PR のクローズ、既定ブランチへの push、.autopilot/ のコミット、機密情報（APIキー・秘密鍵・未暗号化 SOPS 等）のコミットや Issue・PR への投稿。`;
 
 export type ShipMode = "pr" | "local";
 

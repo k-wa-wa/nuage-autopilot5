@@ -508,3 +508,71 @@ agy:
     TIMEOUT,
   );
 });
+
+describe("機密情報漏洩防止 (secret-shield)", () => {
+  test(
+    "autopilot-run 起動時に pre-commit フックが配置される",
+    async () => {
+      setup();
+      env.world.scripts({
+        claude: { implement: ["commit"], fix: [], summarize: ["result"] },
+        agy: { review: ["say:指摘なし"] },
+      });
+      const r = await main(["--local"]);
+      expect(r.code).toBe(0);
+      const hookPath = join(env.repo.work, ".git", "hooks", "pre-commit");
+      expect(existsSync(hookPath)).toBe(true);
+      expect(readFileSync(hookPath, "utf8")).toContain("shield pre-commit");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "shield pre-commit: 未暗号化 SOPS がステージされていると exit 1 で阻止する",
+    async () => {
+      setup();
+      const secretFile = join(env.repo.work, "secrets.yaml");
+      writeFileSync(secretFile, "db_password: plainpassword123\n");
+      git(env.repo.work, "add", "secrets.yaml");
+
+      const r = await main(["shield", "pre-commit"]);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("未暗号化の SOPS ファイル");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "shield gh: 機密情報を含む PR 作成は exit 1 で阻止され、gh は呼ばれない",
+    async () => {
+      setup();
+      const secret = "ghp_xK9pL2mQ8vR4tY7wZ1bN5cF3hJ6sD0gA9eC4";
+      const fakeGh = join(env.world.bin, "gh");
+      const r = await main(
+        ["shield", "gh", "pr", "create", "-t", "feat", "-b", `Token: ${secret}`],
+        {
+          GH_REAL_PATH: fakeGh,
+        },
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("機密情報");
+      // fake gh のログに pr create が記録されていないこと
+      expect(env.world.ghLog()).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "shield gh: クリーンな PR 作成は本物の gh (fake gh) に透過転送される",
+    async () => {
+      setup();
+      const fakeGh = join(env.world.bin, "gh");
+      const r = await main(["shield", "gh", "pr", "create", "-t", "feat", "-b", "Clean PR body"], {
+        GH_REAL_PATH: fakeGh,
+      });
+      expect(r.code).toBe(0);
+      expect(env.world.ghLog().some((l) => l.includes("pr create"))).toBe(true);
+    },
+    TIMEOUT,
+  );
+});

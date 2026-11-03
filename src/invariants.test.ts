@@ -54,11 +54,12 @@ describe("禁止事項はすべての自律ターンに届く", () => {
   };
 
   for (const [kind, p] of Object.entries(autonomous)) {
-    test(`${kind}: マージ・クローズ・既定ブランチへの push・.autopilot/ のコミットを禁じ、質問させない`, () => {
+    test(`${kind}: マージ・クローズ・既定ブランチへの push・.autopilot/ のコミット・機密情報の投稿を禁じ、質問させない`, () => {
       expect(p).toContain("PR のマージ");
       expect(p).toContain("Issue・PR のクローズ");
       expect(p).toContain("既定ブランチへの push");
       expect(p).toContain(".autopilot/ のコミット");
+      expect(p).toContain("機密情報");
       expect(p).toContain("質問しない");
     });
   }
@@ -112,8 +113,9 @@ describe("全エージェント共通のルール（home/）", () => {
     expect(rules).toContain("自分で実装しない");
   });
 
-  test("マージ・クローズ・既定ブランチへの push を禁じる", () => {
+  test("マージ・クローズ・既定ブランチへの push、機密情報の投稿を禁じる", () => {
     expect(rules).toMatch(/PR のマージ、Issue・PR のクローズ、既定ブランチへの push はしない/);
+    expect(rules).toContain("機密情報");
   });
 
   test("スキルは実在するコマンドとファイルだけを案内する", () => {

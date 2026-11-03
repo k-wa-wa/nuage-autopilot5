@@ -371,6 +371,10 @@ export function fakeWorld(root: string, agents: readonly string[] = ["claude", "
   const realGit = Bun.which("git");
   if (!realGit) throw new Error("git が無い");
   symlinkSync(realGit, join(bin, "git"));
+  const realGitleaks = Bun.which("gitleaks");
+  if (realGitleaks) {
+    symlinkSync(realGitleaks, join(bin, "gitleaks"));
+  }
 
   const readLines = (name: string): string[] => {
     const path = join(stateDir, name);

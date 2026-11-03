@@ -26,6 +26,7 @@
             pkgs.bun
             pkgs.git
             pkgs.gh
+            pkgs.gitleaks
           ];
         };
       }

@@ -197,3 +197,20 @@ describe("レビューが仕様受入検査に偏り、ほぼ毎回「must な�
     expect(p).toContain("should や nit があれば「指摘なし」とせず続けてすべて書く");
   });
 });
+
+describe("機密情報や未暗号化 SOPS の誤送信・コミットをブロックする", () => {
+  test("PR 作成や API 更新の本文に含まれる機密情報は exit 1 で送信を阻止する", async () => {
+    const { extractGhTexts, scanText } = await import("./shield.ts");
+    const secret = "ghp_xK9pL2mQ8vR4tY7wZ1bN5cF3hJ6sD0gA9eC4";
+    const extracted = extractGhTexts(["pr", "create", "-t", "feat", "-b", `Leaked: ${secret}`]);
+    expect(extracted.shouldScan).toBe(true);
+    const scanned = await scanText(extracted.texts.join("\n"));
+    expect(scanned.ok).toBe(false);
+  });
+
+  test("未暗号化の secrets.yaml は sops_mac 不在としてブロックする", async () => {
+    const { isEncryptedSops, isSopsCandidateFile } = await import("./shield.ts");
+    expect(isSopsCandidateFile("secrets.yaml")).toBe(true);
+    expect(isEncryptedSops("password: plain_password\napi_key: 12345\n")).toBe(false);
+  });
+});
