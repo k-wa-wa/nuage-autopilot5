@@ -582,6 +582,36 @@ describe("機密情報漏洩防止 (secret-shield)", () => {
   );
 
   test(
+    "shield gh: gh api --field body=@<file> の秘密も exit 1 で阻止される (must 3)",
+    async () => {
+      setup();
+      const secret = "ghp_xK9pL2mQ8vR4tY7wZ1bN5cF3hJ6sD0gA9eC4";
+      const secretFile = join(env.repo.work, "leak.txt");
+      writeFileSync(secretFile, `Token is ${secret}\n`);
+      const fakeGh = join(env.world.bin, "gh");
+      const r = await main(
+        [
+          "shield",
+          "gh",
+          "api",
+          "-X",
+          "PATCH",
+          "repos/o/r/pulls/1",
+          "--field",
+          `body=@${secretFile}`,
+        ],
+        {
+          GH_REAL_PATH: fakeGh,
+        },
+      );
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("機密情報");
+      expect(env.world.ghLog()).toEqual([]);
+    },
+    TIMEOUT,
+  );
+
+  test(
     "shield gh: クリーンな PR 作成は本物の gh (fake gh) に透過転送される",
     async () => {
       setup();

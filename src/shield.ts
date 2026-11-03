@@ -1,4 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { capture } from "./exec.ts";
 
@@ -235,6 +242,35 @@ export interface ExtractResult {
   texts: string[];
 }
 
+function parseField(
+  val: string,
+  isTyped: boolean,
+  stdinText?: string,
+): { texts: string[]; needsStdin: boolean } {
+  const texts: string[] = [val];
+  let needsStdin = false;
+  if (isTyped) {
+    const eq = val.indexOf("=");
+    if (eq !== -1) {
+      const rhs = val.slice(eq + 1);
+      if (rhs === "@-") {
+        needsStdin = true;
+        if (stdinText) texts.push(stdinText);
+      } else if (rhs.startsWith("@")) {
+        const p = rhs.slice(1);
+        if (existsSync(p)) {
+          try {
+            texts.push(readFileSync(p, "utf8"));
+          } catch {
+            // 読み取り不可時はスキップ
+          }
+        }
+      }
+    }
+  }
+  return { texts, needsStdin };
+}
+
 /**
  * gh コマンドライン引数から、スキャン対象のテキストを抽出する。
  */
@@ -350,59 +386,31 @@ export function extractGhTexts(args: string[], stdinText?: string): ExtractResul
         }
       }
     } else if (isApi) {
-      // -f, --field (key=val または key=val 全体)
-      if (arg === "-f" || arg === "--field") {
+      // -f, --raw-field (静的文字列パラメータ: key=val)
+      if (arg === "-f" || arg === "--raw-field") {
         if (i + 1 < args.length) texts.push(args[++i]!);
-      } else if (arg.startsWith("-f=") || arg.startsWith("--field=")) {
+      } else if (arg.startsWith("-f=") || arg.startsWith("--raw-field=")) {
         texts.push(arg.slice(arg.indexOf("=") + 1));
       } else if (arg.startsWith("-f") && arg.length > 2) {
         texts.push(arg.slice(2));
       }
-      // -F, --raw-field (key=val または key=@file, key=@-)
-      else if (arg === "-F" || arg === "--raw-field") {
+      // -F, --field (型付き・ファイル・stdin パラメータ: key=val, key=@file, key=@-)
+      else if (arg === "-F" || arg === "--field") {
         if (i + 1 < args.length) {
-          const val = args[++i]!;
-          texts.push(val);
-          const eq = val.indexOf("=");
-          if (eq !== -1) {
-            const rhs = val.slice(eq + 1);
-            if (rhs === "@-") {
-              needsStdin = true;
-              if (stdinText) texts.push(stdinText);
-            } else if (rhs.startsWith("@")) {
-              const p = rhs.slice(1);
-              if (existsSync(p)) texts.push(readFileSync(p, "utf8"));
-            }
-          }
+          const r = parseField(args[++i]!, true, stdinText);
+          texts.push(...r.texts);
+          if (r.needsStdin) needsStdin = true;
         }
-      } else if (arg.startsWith("-F=") || arg.startsWith("--raw-field=")) {
+      } else if (arg.startsWith("-F=") || arg.startsWith("--field=")) {
         const val = arg.slice(arg.indexOf("=") + 1);
-        texts.push(val);
-        const eq = val.indexOf("=");
-        if (eq !== -1) {
-          const rhs = val.slice(eq + 1);
-          if (rhs === "@-") {
-            needsStdin = true;
-            if (stdinText) texts.push(stdinText);
-          } else if (rhs.startsWith("@")) {
-            const p = rhs.slice(1);
-            if (existsSync(p)) texts.push(readFileSync(p, "utf8"));
-          }
-        }
+        const r = parseField(val, true, stdinText);
+        texts.push(...r.texts);
+        if (r.needsStdin) needsStdin = true;
       } else if (arg.startsWith("-F") && arg.length > 2) {
         const val = arg.slice(2);
-        texts.push(val);
-        const eq = val.indexOf("=");
-        if (eq !== -1) {
-          const rhs = val.slice(eq + 1);
-          if (rhs === "@-") {
-            needsStdin = true;
-            if (stdinText) texts.push(stdinText);
-          } else if (rhs.startsWith("@")) {
-            const p = rhs.slice(1);
-            if (existsSync(p)) texts.push(readFileSync(p, "utf8"));
-          }
-        }
+        const r = parseField(val, true, stdinText);
+        texts.push(...r.texts);
+        if (r.needsStdin) needsStdin = true;
       }
       // --input
       else if (arg === "--input") {
@@ -434,7 +442,10 @@ export function extractGhTexts(args: string[], stdinText?: string): ExtractResul
  * pre-commit フックの実行。
  * 自走の検査（SOPS + gitleaks）を実行後、リポジトリローカルの既存フックがあれば連鎖実行する。
  */
-export async function runPreCommit(cwd: string = process.cwd()): Promise<number> {
+export async function runPreCommit(
+  cwd: string = process.cwd(),
+  hookArgs: string[] = [],
+): Promise<number> {
   const res = await scanStaged(cwd);
   if (!res.ok) {
     console.error(
@@ -447,23 +458,33 @@ export async function runPreCommit(cwd: string = process.cwd()): Promise<number>
   }
 
   // リポジトリ側の既存 pre-commit フック（husky, pre-commit framework 等）があれば連鎖実行
-  const localGit = await capture(["git", "rev-parse", "--git-path", "hooks/pre-commit"], cwd);
-  if (localGit.code === 0 && localGit.stdout.trim()) {
-    const localHook = resolve(cwd, localGit.stdout.trim());
+  // core.hooksPath が設定されている場合でも本来のリポジトリ側フックを見つけるため --git-common-dir から探す
+  const commonDirRes = await capture(["git", "rev-parse", "--git-common-dir"], cwd);
+  if (commonDirRes.code === 0 && commonDirRes.stdout.trim()) {
+    const commonDir = commonDirRes.stdout.trim();
+    const localHook = resolve(cwd, commonDir, "hooks", "pre-commit");
     if (existsSync(localHook)) {
       try {
-        const content = readFileSync(localHook, "utf8");
-        // autopilot-run 自身のフック呼び出しでなければ実行
-        if (!content.includes("autopilot-run shield pre-commit")) {
-          const child = Bun.spawn([localHook, ...process.argv.slice(2)], {
-            cwd,
-            stdio: ["inherit", "inherit", "inherit"],
-          });
-          const code = await child.exited;
-          if (code !== 0) return code;
+        // 現在実行中のプロセス自身（ラッパーや autopilot-run スクリプト）との無限再帰を防ぐ
+        const hookReal = realpathSync(localHook);
+        const selfScript = process.argv[1] ? realpathSync(process.argv[1]) : "";
+        const isSelf =
+          hookReal === selfScript ||
+          hookReal.endsWith("autopilot5/hooks/pre-commit") ||
+          hookReal.endsWith("autopilot-shield/pre-commit");
+        if (!isSelf) {
+          const content = readFileSync(localHook, "utf8");
+          if (!content.includes("autopilot-run shield pre-commit")) {
+            const child = Bun.spawn([localHook, ...hookArgs], {
+              cwd,
+              stdio: ["inherit", "inherit", "inherit"],
+            });
+            const code = await child.exited;
+            if (code !== 0) return code;
+          }
         }
       } catch {
-        // 読み取り不可時はスキップ
+        // パス解決・読み取り不可時はスキップ
       }
     }
   }

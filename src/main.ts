@@ -152,7 +152,7 @@ async function main(argv: string[]): Promise<number> {
   if (argv[0] === "shield") {
     const sub = argv[1];
     if (sub === "pre-commit") {
-      return await runPreCommit();
+      return await runPreCommit(process.cwd(), argv.slice(2));
     }
     if (sub === "gh") {
       return await runSafeGh(argv.slice(2));
