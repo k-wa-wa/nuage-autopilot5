@@ -123,6 +123,10 @@ in
     environment.etc."autopilot5/models.yaml" = lib.mkIf (cfg.models != null) {
       source = checkedModels;
     };
-    systemd.tmpfiles.rules = lib.concatMap rulesFor cfg.agents;
+    systemd.tmpfiles.rules = lib.concatMap rulesFor cfg.agents ++ [
+      # home-manager や per-user プロファイルより PATH の前にある ~/.local/bin に安全ラッパーを配備
+      "d ${home}/.local/bin 0755 ${cfg.user} ${group} -"
+      "L+ ${home}/.local/bin/gh - - - - ${cfg.package}/bin/gh"
+    ];
   };
 }

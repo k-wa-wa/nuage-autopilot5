@@ -352,6 +352,8 @@ if (has("run", "view")) out("Error: test failed");
 fail("fake gh: 未対応の呼び出し: " + args.join(" "));
 `;
 
+const MAIN = join(import.meta.dir, "..", "main.ts");
+
 /** 偽の claude / agy / copilot / gh と本物の git だけを置いた bin を作る。 */
 export function fakeWorld(root: string, agents: readonly string[] = ["claude", "agy"]): FakeWorld {
   const bin = join(root, "bin");
@@ -368,13 +370,13 @@ export function fakeWorld(root: string, agents: readonly string[] = ["claude", "
   };
   for (const a of agents) write(a, `const NAME = ${JSON.stringify(a)};\n${FAKE_AGENT}`);
   write("gh", `const GH_NO_AUTH = ${JSON.stringify(GH_NO_AUTH)};\n${FAKE_GH}`);
+  write("autopilot-run", `import "${MAIN}";\n`);
   const realGit = Bun.which("git");
   if (!realGit) throw new Error("git が無い");
   symlinkSync(realGit, join(bin, "git"));
   const realGitleaks = Bun.which("gitleaks");
-  if (realGitleaks) {
-    symlinkSync(realGitleaks, join(bin, "gitleaks"));
-  }
+  if (!realGitleaks) throw new Error("gitleaks が無い");
+  symlinkSync(realGitleaks, join(bin, "gitleaks"));
 
   const readLines = (name: string): string[] => {
     const path = join(stateDir, name);
@@ -390,8 +392,6 @@ export function fakeWorld(root: string, agents: readonly string[] = ["claude", "
     ghLog: () => readLines("gh.log"),
   };
 }
-
-const MAIN = join(import.meta.dir, "..", "main.ts");
 
 /** autopilot-run を別プロセスで動かす。PATH は偽の bin と /bin（sh）だけにする。 */
 export function spawnMain(

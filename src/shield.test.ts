@@ -12,22 +12,40 @@ import {
 import { git, tempDir } from "./testing/helpers.ts";
 
 describe("SOPS 暗号化ファイル判定", () => {
-  test("候補ファイル名の判定", () => {
+  test("候補ファイル名の判定（secrets*.yaml や *.secrets.yaml）", () => {
     expect(isSopsCandidateFile("secrets.yaml")).toBe(true);
     expect(isSopsCandidateFile("secrets.yml")).toBe(true);
     expect(isSopsCandidateFile("path/to/secrets.yaml")).toBe(true);
     expect(isSopsCandidateFile("secrets-prod.yaml")).toBe(true);
     expect(isSopsCandidateFile("app.secrets.json")).toBe(true);
-    expect(isSopsCandidateFile("secret_config.yaml")).toBe(true);
 
-    // 除外対象
+    // 除外対象: 設定ファイルや一般的な Kubernetes Secret マニフェスト・ダミーファイル
     expect(isSopsCandidateFile(".sops.yaml")).toBe(false);
     expect(isSopsCandidateFile(".sops.yml")).toBe(false);
     expect(isSopsCandidateFile("README.md")).toBe(false);
     expect(isSopsCandidateFile("src/main.ts")).toBe(false);
+    expect(isSopsCandidateFile("manifests/apps/autopilot/base/secret.yaml")).toBe(false);
+    expect(isSopsCandidateFile("manifests/bootstrap/argocd/notifications-secret.yaml")).toBe(false);
+    expect(isSopsCandidateFile("manifests/apps/pechka-preview-secret-appset.yaml")).toBe(false);
+    expect(isSopsCandidateFile("local-secrets.yaml")).toBe(false);
   });
 
-  test("暗号化済み SOPS の判定 (sops_mac / mac: ENC[...])", () => {
+  test(".sops.yaml の path_regex を尊重する", () => {
+    const tmp = tempDir();
+    writeFileSync(
+      join(tmp.path, ".sops.yaml"),
+      `
+creation_rules:
+  - path_regex: secrets/.*\\.ya?ml$
+    age: age123
+`,
+    );
+    expect(isSopsCandidateFile("secrets/dev.yaml", tmp.path)).toBe(true);
+    expect(isSopsCandidateFile("other/secrets.yaml", tmp.path)).toBe(false);
+    tmp.cleanup();
+  });
+
+  test("暗号化済み SOPS の判定 (sops_mac / mac: ENC[...] / sops:allow)", () => {
     const encryptedYaml = `
 data: ENC[AES256_GCM,data:xyz,iv:abc,tag:123]
 sops:
@@ -40,6 +58,12 @@ sops:
 sops_mac: ENC[AES256_GCM,data:macdata]
 `;
     expect(isEncryptedSops(legacyEncrypted)).toBe(true);
+
+    const allowedYaml = `
+# sops:allow
+password: dummy
+`;
+    expect(isEncryptedSops(allowedYaml)).toBe(true);
 
     const plainYaml = `
 password: supersecretpassword123
@@ -72,27 +96,25 @@ describe("extractGhTexts", () => {
     expect(res.texts).toContain("PR description with details");
   });
 
-  test("gh pr comment の -b 引数を抽出", () => {
+  test("gh pr review -b, pr comment の -b 引数を抽出", () => {
     const res = extractGhTexts(["pr", "comment", "42", "-b", "Looks good to me"]);
     expect(res.shouldScan).toBe(true);
     expect(res.texts).toContain("Looks good to me");
+
+    const reviewRes = extractGhTexts(["pr", "review", "42", "-b", "Review comment"]);
+    expect(reviewRes.shouldScan).toBe(true);
+    expect(reviewRes.texts).toContain("Review comment");
   });
 
-  test("gh issue create / comment の引数を抽出", () => {
-    const res = extractGhTexts([
-      "issue",
-      "create",
-      "-t",
-      "Bug report",
-      "--body=Detailed bug description",
-    ]);
+  test("短縮オプションの結合形 (-bTEXT, -tTITLE) を抽出", () => {
+    const res = extractGhTexts(["pr", "create", "-tMyTitle", "-bMyBody"]);
     expect(res.shouldScan).toBe(true);
-    expect(res.texts).toContain("Bug report");
-    expect(res.texts).toContain("Detailed bug description");
+    expect(res.texts).toContain("MyTitle");
+    expect(res.texts).toContain("MyBody");
   });
 
-  test("gh api の -f body=..., -F, --input 引数を抽出", () => {
-    const res = extractGhTexts([
+  test("gh api の -f body=..., -fkey=val, -F, --raw-field 引数を抽出", () => {
+    const res1 = extractGhTexts([
       "api",
       "-X",
       "PATCH",
@@ -100,14 +122,50 @@ describe("extractGhTexts", () => {
       "-f",
       "body=updated body content",
     ]);
-    expect(res.shouldScan).toBe(true);
-    expect(res.texts).toContain("updated body content");
+    expect(res1.shouldScan).toBe(true);
+    expect(res1.texts).toContain("body=updated body content");
+
+    const res2 = extractGhTexts([
+      "api",
+      "-X",
+      "POST",
+      "repos/owner/repo/pulls/1/comments",
+      "-F",
+      "body=secret_token_123",
+    ]);
+    expect(res2.shouldScan).toBe(true);
+    expect(res2.texts).toContain("body=secret_token_123");
+
+    const res3 = extractGhTexts([
+      "api",
+      "-X",
+      "POST",
+      "repos/owner/repo/issues",
+      "-fbody=compact_val",
+      "--raw-field",
+      "raw_key=raw_val",
+    ]);
+    expect(res3.shouldScan).toBe(true);
+    expect(res3.texts).toContain("body=compact_val");
+    expect(res3.texts).toContain("raw_key=raw_val");
   });
 
-  test("--body-file - または stdinText が渡された場合に抽出", () => {
-    const res = extractGhTexts(["pr", "create", "-F", "-"], "stdin body content");
+  test("gh api -F key=@file からファイル内容を読み込む", () => {
+    const tmp = tempDir();
+    const filePath = join(tmp.path, "secret.txt");
+    writeFileSync(filePath, "file content from at");
+    const res = extractGhTexts(["api", "repos/o/r", "-F", `body=@${filePath}`]);
     expect(res.shouldScan).toBe(true);
-    expect(res.texts).toContain("stdin body content");
+    expect(res.texts).toContain("file content from at");
+    tmp.cleanup();
+  });
+
+  test("--body-file - または --input - があるときだけ needsStdin: true", () => {
+    expect(extractGhTexts(["pr", "view"]).needsStdin).toBe(false);
+    expect(extractGhTexts(["pr", "create", "-t", "T", "-b", "B"]).needsStdin).toBe(false);
+    expect(extractGhTexts(["pr", "create", "-F", "-"]).needsStdin).toBe(true);
+    expect(extractGhTexts(["api", "repos/o/r", "--input", "-"]).needsStdin).toBe(true);
+    expect(extractGhTexts(["api", "repos/o/r", "-F", "body=@-"]).needsStdin).toBe(true);
   });
 });
 
@@ -152,6 +210,21 @@ describe("コミット前検査 (checkUnencryptedSops & scanStaged)", () => {
 
     const stagedRes = await scanStaged(tmp.path);
     expect(stagedRes.ok).toBe(false);
+    tmp.cleanup();
+  });
+
+  test("名前変更 (git mv plain.yaml secrets.yaml) による未暗号化 SOPS の追加もブロックする", async () => {
+    tmp = tempDir();
+    git(tmp.path, "init", "-b", "main");
+    const plainFile = join(tmp.path, "plain.yaml");
+    writeFileSync(plainFile, "password: plainpassword1234\n");
+    git(tmp.path, "add", "plain.yaml");
+    git(tmp.path, "commit", "-qm", "add plain");
+    git(tmp.path, "mv", "plain.yaml", "secrets.yaml");
+
+    const sopsRes = await checkUnencryptedSops(tmp.path);
+    expect(sopsRes.ok).toBe(false);
+    expect(sopsRes.reason).toContain("未暗号化の SOPS ファイル");
     tmp.cleanup();
   });
 
@@ -211,7 +284,35 @@ describe("runSafeGh (安全ラッパー)", () => {
       const { runSafeGh } = await import("./shield.ts");
       const code = await runSafeGh(["pr", "create", "-t", "feat", "-b", `Token is ${secret}`]);
       expect(code).toBe(1);
-      // mock-gh は呼ばれていないはず
+      expect(existsSync(logFile)).toBe(false);
+    } finally {
+      if (oldGhReal) process.env.GH_REAL_PATH = oldGhReal;
+      else delete process.env.GH_REAL_PATH;
+      tmp.cleanup();
+    }
+  });
+
+  test("gh api -F body=<秘密> も exit 1 でブロックされる", async () => {
+    tmp = tempDir();
+    const mockGh = join(tmp.path, "mock-gh");
+    const logFile = join(tmp.path, "gh.log");
+    writeFileSync(mockGh, `#!/bin/sh\necho "$@" >> "${logFile}"\n`);
+    chmodSync(mockGh, 0o755);
+
+    const oldGhReal = process.env.GH_REAL_PATH;
+    process.env.GH_REAL_PATH = mockGh;
+    try {
+      const secret = "ghp_xK9pL2mQ8vR4tY7wZ1bN5cF3hJ6sD0gA9eC4";
+      const { runSafeGh } = await import("./shield.ts");
+      const code = await runSafeGh([
+        "api",
+        "-X",
+        "PATCH",
+        "repos/o/r/pulls/1",
+        "-F",
+        `body=${secret}`,
+      ]);
+      expect(code).toBe(1);
       expect(existsSync(logFile)).toBe(false);
     } finally {
       if (oldGhReal) process.env.GH_REAL_PATH = oldGhReal;
@@ -242,7 +343,7 @@ describe("runSafeGh (安全ラッパー)", () => {
     }
   });
 
-  test("読み取り系コマンド (pr view) はスキャンせず透過転送される", async () => {
+  test("読み取り系コマンド (pr view) は stdin に触れず透過転送される", async () => {
     tmp = tempDir();
     const mockGh = join(tmp.path, "mock-gh");
     const logFile = join(tmp.path, "gh.log");

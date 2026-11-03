@@ -75,11 +75,10 @@ stdenv.mkDerivation {
         ]
       }
 
-    # PR・CI の操作に使う。エージェント CLI（claude / agy / copilot）は Nix 管理外なので含めない。
-    wrapProgram $out/bin/autopilot-run --prefix PATH : ${
+    # PR・CI の操作に使う。安全ラッパー ($out/bin/gh) を PATH の先頭に置き、子プロセスが必ずラッパーを経由するようにする。
+    wrapProgram $out/bin/autopilot-run --prefix PATH : $out/bin:${
       lib.makeBinPath [
         git
-        gh
         gitleaks
       ]
     }
