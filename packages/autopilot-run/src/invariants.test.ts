@@ -96,7 +96,7 @@ describe("モデル名は models.yaml だけに書く", () => {
   });
 
   test("home/（窓口が読むルールとスキル）に実在のモデル名を書かない", () => {
-    const hits = homeFiles(join(SRC, "..", "home")).filter((f) =>
+    const hits = homeFiles(join(SRC, "../../../home")).filter((f) =>
       REAL_MODEL.test(readFileSync(f, "utf8")),
     );
     expect(hits).toEqual([]);
@@ -104,7 +104,7 @@ describe("モデル名は models.yaml だけに書く", () => {
 });
 
 describe("全エージェント共通のルール（home/）", () => {
-  const home = join(SRC, "..", "home");
+  const home = join(SRC, "../../../home");
   const rules = readFileSync(join(home, "AGENTS.md"), "utf8");
   const skill = readFileSync(join(home, "skills", "autopilot", "SKILL.md"), "utf8");
 

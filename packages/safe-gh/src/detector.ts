@@ -1,28 +1,6 @@
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  realpathSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { capture } from "./exec.ts";
-
-/**
- * 機密情報漏洩防止（Secret Shield）モジュール。
- *
- * 1. Git pre-commit フック:
- *    - 未暗号化 SOPS ファイル（secrets*.yaml 等の平文コミット、sops_mac 不在）を検査
- *    - gitleaks git --staged でステージされた差分を検査
- *    - リポジトリ既存のローカルフックがあれば連鎖実行
- * 2. gh セーフラッパー:
- *    - gh pr create/edit/comment/review, gh issue create/edit/comment, gh api のテキスト引数を抽出
- *    - stdin は -F -, --body-file -, --input - 等で明示された場合のみ読み込み（読み取り系のハング防止）
- *    - gitleaks stdin で機密情報をスキャン
- *    - 機密情報検知時は exit 1 でブロック（本物の gh は呼ばない）
- *    - 機密情報なし／読み取りコマンドは本物の gh に透過転送
- */
 
 /**
  * リポジトリの .sops.yaml から path_regex 一覧を読み取る。
@@ -438,71 +416,6 @@ export function extractGhTexts(args: string[], stdinText?: string): ExtractResul
   return { shouldScan: true, needsStdin, texts };
 }
 
-/**
- * pre-commit フックの実行。
- * 自走の検査（SOPS + gitleaks）を実行後、リポジトリローカルの既存フックがあれば連鎖実行する。
- */
-export async function runPreCommit(
-  cwd: string = process.cwd(),
-  hookArgs: string[] = [],
-): Promise<number> {
-  const res = await scanStaged(cwd);
-  if (!res.ok) {
-    console.error(
-      `\x1b[31m[secret-shield] 機密情報が検知されたためコミットを中断しました:\x1b[0m ${res.reason}`,
-    );
-    if (res.detail) {
-      console.error(res.detail);
-    }
-    return 1;
-  }
-
-  // リポジトリ側の既存 pre-commit フック（husky, pre-commit framework 等）があれば連鎖実行
-  // core.hooksPath が設定されている場合でも本来のリポジトリ側フックを見つけるため --git-common-dir から探す
-  const commonDirRes = await capture(["git", "rev-parse", "--git-common-dir"], cwd);
-  if (commonDirRes.code === 0 && commonDirRes.stdout.trim()) {
-    const commonDir = commonDirRes.stdout.trim();
-    const localHook = resolve(cwd, commonDir, "hooks", "pre-commit");
-    if (existsSync(localHook)) {
-      let isSelf = false;
-      try {
-        const hookReal = realpathSync(localHook);
-        const selfExec = realpathSync(process.execPath);
-        if (hookReal === selfExec || hookReal.includes("autopilot5/hooks/pre-commit")) {
-          isSelf = true;
-        }
-      } catch {
-        // パス解決失敗時は内容で判定
-      }
-
-      let content = "";
-      try {
-        content = readFileSync(localHook, "utf8");
-      } catch {
-        // 読み取り失敗
-      }
-
-      if (
-        content.includes("autopilot secret-shield pre-commit hook") ||
-        content.includes("autopilot-run shield pre-commit")
-      ) {
-        isSelf = true;
-      }
-
-      if (!isSelf) {
-        const child = Bun.spawn([localHook, ...hookArgs], {
-          cwd,
-          stdio: ["inherit", "inherit", "inherit"],
-        });
-        const code = await child.exited;
-        if (code !== 0) return code;
-      }
-    }
-  }
-
-  return 0;
-}
-
 /** 本物の gh のパスを取得する（無限再帰を防ぐ）。 */
 export function resolveRealGh(): string {
   if (process.env.GH_REAL_PATH && existsSync(process.env.GH_REAL_PATH)) {
@@ -515,7 +428,11 @@ export function resolveRealGh(): string {
     if (existsSync(candidate)) {
       try {
         const real = resolve(candidate);
-        if (real !== currentScript && !candidate.includes("autopilot")) {
+        if (
+          real !== currentScript &&
+          !candidate.includes("safe-gh") &&
+          !candidate.includes("autopilot")
+        ) {
           return candidate;
         }
       } catch {
@@ -527,95 +444,46 @@ export function resolveRealGh(): string {
 }
 
 /**
- * gh セーフラッパーの実行。
+ * リポジトリローカルの既存 pre-commit フックを探す。
+ * 自身（safe-gh / pre-commit）の場合は無限再帰を防ぐため除外する。
  */
-export async function runSafeGh(args: string[]): Promise<number> {
-  // まず引数からスキャン要否と stdin 読み込み要否を判定
-  const initial = extractGhTexts(args);
+export async function resolveLocalHook(cwd: string = process.cwd()): Promise<string | null> {
+  const commonDirRes = await capture(["git", "rev-parse", "--git-common-dir"], cwd);
+  if (commonDirRes.code !== 0 || !commonDirRes.stdout.trim()) {
+    return null;
+  }
 
-  let stdinText: string | undefined;
+  const commonDir = commonDirRes.stdout.trim();
+  const localHook = resolve(cwd, commonDir, "hooks", "pre-commit");
+  if (!existsSync(localHook)) {
+    return null;
+  }
 
-  // stdin が必要と指定された場合のみ読み込む（読み取り系のパイプハングを防止）
-  if (initial.shouldScan && initial.needsStdin && !process.stdin.isTTY) {
-    const chunks: Buffer[] = [];
-    for await (const chunk of process.stdin) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  let isSelf = false;
+  try {
+    const hookReal = realpathSync(localHook);
+    const selfExec = realpathSync(process.execPath);
+    if (hookReal === selfExec || hookReal.includes("autopilot5/hooks/pre-commit")) {
+      isSelf = true;
     }
-    stdinText = Buffer.concat(chunks).toString("utf8");
+  } catch {
+    // パス解決失敗時は内容で判定
   }
 
-  // stdinText がある場合は再抽出
-  const { shouldScan, texts } =
-    initial.needsStdin && stdinText !== undefined ? extractGhTexts(args, stdinText) : initial;
-
-  if (shouldScan) {
-    for (const text of texts) {
-      const res = await scanText(text);
-      if (!res.ok) {
-        console.error(
-          `\x1b[31m[secret-shield] 機密情報が検知されたため GitHub への送信を中断しました:\x1b[0m ${res.reason}`,
-        );
-        if (res.detail) {
-          console.error(res.detail);
-        }
-        return 1;
-      }
-    }
+  let content = "";
+  try {
+    content = readFileSync(localHook, "utf8");
+  } catch {
+    // 読み取り失敗
   }
 
-  // クリーンまたは対象外コマンド: 本物の gh に透過転送
-  const realGh = resolveRealGh();
-  const proc = Bun.spawn([realGh, ...args], {
-    stdin: stdinText !== undefined ? "pipe" : "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-
-  if (stdinText !== undefined && proc.stdin) {
-    proc.stdin.write(stdinText);
-    proc.stdin.end();
+  if (
+    content.includes("safe-gh pre-commit hook") ||
+    content.includes("autopilot secret-shield pre-commit hook") ||
+    content.includes("autopilot-run shield pre-commit")
+  ) {
+    isSelf = true;
   }
 
-  return await proc.exited;
-}
-
-/**
- * リポジトリの pre-commit フックを確実に有効化する。
- * システム設定（core.hooksPath）が無い環境でのフォールバックとして配置する。
- */
-export async function ensureGitHooks(gitDir: string): Promise<void> {
-  // システムまたはローカルで core.hooksPath が既に設定されている場合は何もしない
-  const check = await capture(["git", "config", "core.hooksPath"], dirname(gitDir));
-  if (check.code === 0 && check.stdout.trim()) {
-    return;
-  }
-
-  const hooksDir = join(gitDir, "hooks");
-  const preCommitPath = join(hooksDir, "pre-commit");
-  mkdirSync(hooksDir, { recursive: true });
-
-  const currentScript = process.argv[1] ? resolve(process.argv[1]) : "";
-  const execPath = process.execPath;
-  const hookContent = `#!/bin/sh
-# autopilot secret-shield pre-commit hook
-if command -v autopilot-run >/dev/null 2>&1; then
-  exec autopilot-run shield pre-commit "$@"
-elif [ -f "${currentScript}" ]; then
-  exec "${execPath}" "${currentScript}" shield pre-commit "$@"
-fi
-echo "[secret-shield] autopilot-run not found in PATH" >&2
-exit 1
-`;
-
-  if (existsSync(preCommitPath)) {
-    const existing = readFileSync(preCommitPath, "utf8");
-    if (existing.includes("shield pre-commit") || existing.includes("autopilot-run")) {
-      return;
-    }
-    // 既存フックがある場合は連鎖できるように先頭に挿入
-    writeFileSync(preCommitPath, `${hookContent}\n${existing}`);
-  } else {
-    writeFileSync(preCommitPath, hookContent);
-  }
-  chmodSync(preCommitPath, 0o755);
+  return isSelf ? null : localHook;
 }

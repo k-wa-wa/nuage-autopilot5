@@ -21,7 +21,7 @@ stdenv.mkDerivation {
     fileset = lib.fileset.unions [
       ../package.json
       ../tsconfig.json
-      ../src
+      ../packages
       ../home
     ];
   };
@@ -44,17 +44,30 @@ stdenv.mkDerivation {
     runHook preBuild
     export HOME=$TMPDIR
     bun test --isolate
-    bun build --compile --outfile autopilot-run src/main.ts
+    bun build --compile --outfile autopilot-run packages/autopilot-run/src/main.ts
+    bun build --compile --outfile safe-gh packages/safe-gh/src/main.ts
+    bun build --compile --outfile pre-commit packages/safe-gh/src/hook.ts
     runHook postBuild
   '';
 
   installPhase = ''
     runHook preInstall
     install -Dm755 autopilot-run $out/bin/autopilot-run
+    install -Dm755 safe-gh $out/bin/safe-gh
 
-    # Issue / PR への自由記述時の機密情報検査を行う gh 安全ラッパー
-    makeWrapper $out/bin/autopilot-run $out/bin/gh \
-      --add-flags "shield gh" \
+    # Issue / PR への自由記述時の機密情報検査を行う safe-gh ラッパー
+    wrapProgram $out/bin/safe-gh \
+      --set GH_REAL_PATH ${gh}/bin/gh \
+      --prefix PATH : ${
+        lib.makeBinPath [
+          git
+          gh
+          gitleaks
+        ]
+      }
+
+    # gh コマンドとして呼び出された場合も透過的に safe-gh を経由するラッパー
+    makeWrapper $out/bin/safe-gh $out/bin/gh \
       --set GH_REAL_PATH ${gh}/bin/gh \
       --prefix PATH : ${
         lib.makeBinPath [
@@ -66,8 +79,8 @@ stdenv.mkDerivation {
 
     # コミット時にステージされた差分と未暗号化 SOPS を検査する pre-commit フック
     mkdir -p $out/share/autopilot5/hooks
-    makeWrapper $out/bin/autopilot-run $out/share/autopilot5/hooks/pre-commit \
-      --add-flags "shield pre-commit" \
+    install -Dm755 pre-commit $out/share/autopilot5/hooks/pre-commit
+    wrapProgram $out/share/autopilot5/hooks/pre-commit \
       --prefix PATH : ${
         lib.makeBinPath [
           git
@@ -75,7 +88,7 @@ stdenv.mkDerivation {
         ]
       }
 
-    # PR・CI の操作に使う。安全ラッパー ($out/bin/gh) を PATH の先頭に置き、子プロセスが必ずラッパーを経由するようにする。
+    # PR・CI の操作に使う。安全ラッパー ($out/bin) を PATH の先頭に置き、子プロセスが必ずラッパーを経由するようにする。
     wrapProgram $out/bin/autopilot-run --prefix PATH : $out/bin:${
       lib.makeBinPath [
         git

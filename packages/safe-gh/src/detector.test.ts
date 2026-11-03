@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   checkUnencryptedSops,
@@ -8,7 +8,7 @@ import {
   isSopsCandidateFile,
   scanStaged,
   scanText,
-} from "./shield.ts";
+} from "./detector.ts";
 import { git, tempDir } from "./testing/helpers.ts";
 
 describe("SOPS 暗号化ファイル判定", () => {
@@ -150,7 +150,7 @@ describe("extractGhTexts", () => {
     expect(res3.texts).toContain("raw_key=raw_val");
   });
 
-  test("gh api -F / --field key=@file からファイル内容を読み込む (must 3)", () => {
+  test("gh api -F / --field key=@file からファイル内容を読み込む", () => {
     const tmp = tempDir();
     const filePath = join(tmp.path, "secret.txt");
     writeFileSync(filePath, "file content from at");
@@ -164,7 +164,7 @@ describe("extractGhTexts", () => {
     tmp.cleanup();
   });
 
-  test("gh api --field key=@- または -F key=@- のとき needsStdin: true (must 3)", () => {
+  test("gh api --field key=@- または -F key=@- のとき needsStdin: true", () => {
     const res1 = extractGhTexts(["api", "repos/o/r", "--field", "body=@-"], "stdin secret");
     expect(res1.shouldScan).toBe(true);
     expect(res1.needsStdin).toBe(true);
@@ -279,140 +279,6 @@ sops:
     const stagedRes = await scanStaged(tmp.path);
     expect(stagedRes.ok).toBe(false);
     expect(stagedRes.reason).toContain("機密情報");
-    tmp.cleanup();
-  });
-});
-
-describe("runSafeGh (安全ラッパー)", () => {
-  let tmp: ReturnType<typeof tempDir>;
-
-  test("機密情報を含む PR 作成コマンドはブロックされ、本物の gh は呼ばれない", async () => {
-    tmp = tempDir();
-    const mockGh = join(tmp.path, "mock-gh");
-    const logFile = join(tmp.path, "gh.log");
-    writeFileSync(mockGh, `#!/bin/sh\necho "$@" >> "${logFile}"\n`);
-    chmodSync(mockGh, 0o755);
-
-    const oldGhReal = process.env.GH_REAL_PATH;
-    process.env.GH_REAL_PATH = mockGh;
-    try {
-      const secret = "ghp_xK9pL2mQ8vR4tY7wZ1bN5cF3hJ6sD0gA9eC4";
-      const { runSafeGh } = await import("./shield.ts");
-      const code = await runSafeGh(["pr", "create", "-t", "feat", "-b", `Token is ${secret}`]);
-      expect(code).toBe(1);
-      expect(existsSync(logFile)).toBe(false);
-    } finally {
-      if (oldGhReal) process.env.GH_REAL_PATH = oldGhReal;
-      else delete process.env.GH_REAL_PATH;
-      tmp.cleanup();
-    }
-  });
-
-  test("gh api -F body=<秘密> も exit 1 でブロックされる", async () => {
-    tmp = tempDir();
-    const mockGh = join(tmp.path, "mock-gh");
-    const logFile = join(tmp.path, "gh.log");
-    writeFileSync(mockGh, `#!/bin/sh\necho "$@" >> "${logFile}"\n`);
-    chmodSync(mockGh, 0o755);
-
-    const oldGhReal = process.env.GH_REAL_PATH;
-    process.env.GH_REAL_PATH = mockGh;
-    try {
-      const secret = "ghp_xK9pL2mQ8vR4tY7wZ1bN5cF3hJ6sD0gA9eC4";
-      const { runSafeGh } = await import("./shield.ts");
-      const code = await runSafeGh([
-        "api",
-        "-X",
-        "PATCH",
-        "repos/o/r/pulls/1",
-        "-F",
-        `body=${secret}`,
-      ]);
-      expect(code).toBe(1);
-      expect(existsSync(logFile)).toBe(false);
-    } finally {
-      if (oldGhReal) process.env.GH_REAL_PATH = oldGhReal;
-      else delete process.env.GH_REAL_PATH;
-      tmp.cleanup();
-    }
-  });
-
-  test("機密情報を含まない PR 作成コマンドは本物の gh に透過転送される", async () => {
-    tmp = tempDir();
-    const mockGh = join(tmp.path, "mock-gh");
-    const logFile = join(tmp.path, "gh.log");
-    writeFileSync(mockGh, `#!/bin/sh\necho "$@" >> "${logFile}"\nexit 0\n`);
-    chmodSync(mockGh, 0o755);
-
-    const oldGhReal = process.env.GH_REAL_PATH;
-    process.env.GH_REAL_PATH = mockGh;
-    try {
-      const { runSafeGh } = await import("./shield.ts");
-      const code = await runSafeGh(["pr", "create", "-t", "feat", "-b", "Normal body"]);
-      expect(code).toBe(0);
-      expect(existsSync(logFile)).toBe(true);
-      expect(readFileSync(logFile, "utf8")).toContain("pr create -t feat -b Normal body");
-    } finally {
-      if (oldGhReal) process.env.GH_REAL_PATH = oldGhReal;
-      else delete process.env.GH_REAL_PATH;
-      tmp.cleanup();
-    }
-  });
-
-  test("読み取り系コマンド (pr view) は stdin に触れず透過転送される", async () => {
-    tmp = tempDir();
-    const mockGh = join(tmp.path, "mock-gh");
-    const logFile = join(tmp.path, "gh.log");
-    writeFileSync(mockGh, `#!/bin/sh\necho "$@" >> "${logFile}"\nexit 0\n`);
-    chmodSync(mockGh, 0o755);
-
-    const oldGhReal = process.env.GH_REAL_PATH;
-    process.env.GH_REAL_PATH = mockGh;
-    try {
-      const { runSafeGh } = await import("./shield.ts");
-      const code = await runSafeGh(["pr", "view", "123"]);
-      expect(code).toBe(0);
-      expect(existsSync(logFile)).toBe(true);
-      expect(readFileSync(logFile, "utf8")).toContain("pr view 123");
-    } finally {
-      if (oldGhReal) process.env.GH_REAL_PATH = oldGhReal;
-      else delete process.env.GH_REAL_PATH;
-      tmp.cleanup();
-    }
-  });
-});
-
-describe("runPreCommit (ローカルフック連鎖と再帰防止)", () => {
-  let tmp: ReturnType<typeof tempDir>;
-
-  test("ローカルフックが存在する場合に連鎖実行し、本来の引数のみを渡す (must 1 & 2)", async () => {
-    tmp = tempDir();
-    git(tmp.path, "init", "-b", "main");
-    const hookDir = join(tmp.path, ".git", "hooks");
-    const localHook = join(hookDir, "pre-commit");
-    const logFile = join(tmp.path, "hook.log");
-    writeFileSync(localHook, `#!/bin/sh\necho "args:$*" >> "${logFile}"\nexit 0\n`);
-    chmodSync(localHook, 0o755);
-
-    const { runPreCommit } = await import("./shield.ts");
-    // 本来のフック引数（通常は空または特定のフラグ）を渡す
-    const code = await runPreCommit(tmp.path, ["--custom-arg"]);
-    expect(code).toBe(0);
-    expect(existsSync(logFile)).toBe(true);
-    // "shield pre-commit" が引数に含まれず、"--custom-arg" のみ渡る
-    expect(readFileSync(logFile, "utf8").trim()).toBe("args:--custom-arg");
-    tmp.cleanup();
-  });
-
-  test("core.hooksPath で自身が呼ばれても無限再帰せず 0 で終わる (must 1)", async () => {
-    tmp = tempDir();
-    git(tmp.path, "init", "-b", "main");
-    // core.hooksPath を一時的に設定
-    git(tmp.path, "config", "core.hooksPath", join(tmp.path, "nonexistent-hooks"));
-
-    const { runPreCommit } = await import("./shield.ts");
-    const code = await runPreCommit(tmp.path);
-    expect(code).toBe(0);
     tmp.cleanup();
   });
 });
