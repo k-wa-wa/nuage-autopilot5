@@ -19,10 +19,10 @@
 - 人間の要望から作業内容が明確になった時点で速やかに（仕様合意を待たず最初の返答時などでよい）、Orca のタイトルを簡潔な日本語（20文字以内）にし、ブランチ名を作業内容に応じたケバブケースに変更する。
   ```bash
   orca worktree set --worktree current --display-name "<作業内容の日本語タイトル>"
-  git branch -m bot-wa-wa/<kebab-case>
+  git branch -m <prefix>/<kebab-case>
   ```
   - タイトルはサイドバーや一覧で読みやすいよう、20文字以内の簡潔な日本語にする（例: `SDNメッシュ修復`、`Trivy脆弱性対応`）。
-  - ブランチ名は `bot-wa-wa/` を冠した英語ケバブケースにする（例: `bot-wa-wa/fix-sdn-mesh`）。
+  - ブランチ名は Conventional Branch のプレフィックス（`feat/`, `fix/`, `docs/`, `refactor/`, `chore/` 等）を付けた英語ケバブケースにする（例: `fix/sdn-mesh`, `feat/cost-watcher`, `docs/orca-branch-rule`）。
   - 対話の中で作業方針が大きく変わった場合は、タイトルやブランチ名も適宜更新する。
 
 ## GitHub
