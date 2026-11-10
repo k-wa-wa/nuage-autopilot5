@@ -24,15 +24,9 @@
   - タイトルはサイドバーや一覧で読みやすいよう、20文字以内の簡潔な日本語にする（例: `SDNメッシュ修復`、`Trivy脆弱性対応`）。
   - ブランチ名は Conventional Branch のプレフィックス（`feat/`, `fix/`, `docs/`, `refactor/`, `chore/` 等）を付けた英語ケバブケースにする（例: `fix/sdn-mesh`, `feat/cost-watcher`, `docs/orca-branch-rule`）。
   - 対話の中で作業方針が大きく変わった場合は、タイトルやブランチ名も適宜更新する。
-- 関連作業や別リポジトリの修正などで新しいワークツリーを立ち上げる際は、常に現在のワークツリーの子として立ち上げる。自ワークツリー内で実行するか、親ワークツリーを明示的に指定する。
+- 関連作業や別リポジトリの作業で新しいワークツリーを立ち上げる際は、現在のワークツリーの子として立ち上げる。
   ```bash
   orca worktree create --repo <repo> --name <name> --parent-worktree active
-  ```
-  - 人間から「完全に独立した作業」と指示された場合を除き、`--no-parent` は指定しない。
-- 人間が特定のセッションの派生として手動でワークツリーを立ち上げた場合（例: 「〜の続き」「〜の関連」など文脈や指示で親が明らかな場合）は、親が未設定のときに限り、タイトル変更と合わせて親ワークツリーに紐付ける。親の有無は `orca worktree show --worktree current` の `parentWorktreeId` で確認できる。
-  ```bash
-  orca worktree set --worktree current --parent-worktree branch:<親のブランチ>
-  # または path:<親のパス>、id:<親のワークツリーID>
   ```
 
 ## GitHub
