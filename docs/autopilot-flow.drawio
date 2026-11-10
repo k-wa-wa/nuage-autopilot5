@@ -1,0 +1,505 @@
+<mxfile host="app.diagrams.net" agent="autopilot" version="24.7.17">
+  <diagram id="flow" name="autopilot の仕組み">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="2100" pageHeight="4510" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="flow-title" value="autopilot の仕組み — 仕様合意から、autopilot-run の自走、報告まで" style="text;html=1;fontSize=18;fontStyle=1;align=left;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="90" y="20" width="1000" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-b0" value="⓪ 仕様合意" style="whiteSpace=wrap;html=1;fontSize=14;rounded=0;dashed=1;fillColor=none;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=8;spacingTop=2;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="90" y="70" width="1590" height="420" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-ask" value="人間が窓口エージェントに仕事を伝える" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="360" y="115" width="400" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-spec" value="窓口が仕様をまとめ、&lt;br&gt;「OK であれば autopilot に引き継ぐ」と確認する" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#d5f0ee;strokeColor=#4a9a94;" vertex="1" parent="1">
+          <mxGeometry x="360" y="195" width="400" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_reply" value="人間の返答は" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="430" y="285" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-together" value="窓口が対話しながら自分で進める&lt;br&gt;(autopilot スキルは使わない)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#d5f0ee;strokeColor=#4a9a94;" vertex="1" parent="1">
+          <mxGeometry x="880" y="302" width="320" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-skill" value="窓口が autopilot スキルを使う&lt;br&gt;brief.md を書き、autopilot-run プロセスを裏実行で起動する&lt;br&gt;「任せた。終わったら呼ぶ」と返してターンを終える" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#d5f0ee;strokeColor=#4a9a94;" vertex="1" parent="1">
+          <mxGeometry x="340" y="405" width="440" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-f0" value="読み書きするファイル (.autopilot/)&lt;br&gt;&lt;br&gt;・brief.md ← 窓口が書く&lt;br&gt;   目的・仕様と受け入れ条件・会話で決めたこと・&lt;br&gt;   任せる判断・関連 Issue / PR&lt;br&gt;   (担当は会話を知らないので、これだけで作業できるように書く)" style="whiteSpace=wrap;html=1;fontSize=12;shape=note;size=14;fillColor=#fffde7;strokeColor=#bdb76b;align=left;spacingLeft=8;spacingRight=8;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="110" width="360" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-b1" value="① 起動時の検査" style="whiteSpace=wrap;html=1;fontSize=14;rounded=0;dashed=1;fillColor=none;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=8;spacingTop=2;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="90" y="510" width="1590" height="650" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_brief" value="brief.md があり、&lt;br&gt;空でないか" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="400" y="555" width="320" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-x_brief" value="拒否 (終了 2): brief.md が無い" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="582" width="320" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_running" value="すでに実行中か&lt;br&gt;(run.pid のプロセスが生きている)" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="400" y="690" width="320" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-x_running" value="拒否 (終了 1): すでに実行中" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="717" width="320" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_rev" value="レビュー担当が 1 人以上いるか&lt;br&gt;(未指定なら: 実装担当以外で PATH に&lt;br&gt;あり、models.yaml に定義があるもの)" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="400" y="825" width="320" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-x_rev" value="拒否 (終了 2): レビュー担当がいない" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="852" width="320" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_branch" value="作業ブランチの上か&lt;br&gt;(detached HEAD と既定ブランチは不可。&lt;br&gt;PR モードは gh で既定ブランチを読む)" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="400" y="960" width="320" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-x_branch" value="拒否 (終了 2): ブランチに乗っていない /&lt;br&gt;既定ブランチの上 / GitHub を読めない" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="987" width="320" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-prep" value="run.pid を書き、前回の result.md を消す&lt;br&gt;基点 (既定ブランチとの分岐点) を決める&lt;br&gt;担当ごとにモデルの並びを割り当てる" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="340" y="1085" width="440" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-x_end" value="エラーを表示して終了する (⑤ へは進まない)&lt;br&gt;status も result.md も書かれない。&lt;br&gt;窓口は起動したその場でエラーを読む" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="1080" width="320" height="74" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-f1" value="読み書きするファイル (.autopilot/)&lt;br&gt;&lt;br&gt;・brief.md — あるかどうかだけを見る&lt;br&gt;・run.pid ← 書く (二重起動の検査と stop に使う)&lt;br&gt;・result.md — 前回の分を消す&lt;br&gt;・status / run.log ← ここから書き始める&lt;br&gt;・.autopilot/ は git の exclude に足し、コミットさせない" style="whiteSpace=wrap;html=1;fontSize=12;shape=note;size=14;fillColor=#fffde7;strokeColor=#bdb76b;align=left;spacingLeft=8;spacingRight=8;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="555" width="360" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-b2" value="② 実装" style="whiteSpace=wrap;html=1;fontSize=14;rounded=0;dashed=1;fillColor=none;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=8;spacingTop=2;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="90" y="1180" width="1590" height="550" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_from" value="--from は&lt;br&gt;implement か" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="1225" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-impl" value="実装担当のエージェントを起動する (新しい会話)&lt;br&gt;brief.md を実装 → テスト → commit → push → PR 作成&lt;br&gt;(--local では commit まで)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="340" y="1365" width="440" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_implok" value="実装担当は正常終了し、&lt;br&gt;HEAD が進んだか" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="1480" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-x_impl" value="failed: 実装担当が異常終了した /&lt;br&gt;何も commit されなかった" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="1502" width="320" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_pr" value="今のブランチに PR があるか&lt;br&gt;(--local では確かめない)" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="1615" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-x_pr" value="failed: PR が作られなかった" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="1640" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-f2" value="読み書きするファイル (.autopilot/)&lt;br&gt;&lt;br&gt;・brief.md — 実装担当が読む&lt;br&gt;・decisions.md ← 実装担当が判断と理由を書く&lt;br&gt;・agent-stdout.log ← 会話 ID を読むための生の出力&lt;br&gt;・run.log ← 担当の出力&lt;br&gt;&lt;br&gt;成否は commit と PR の実物で確かめる" style="whiteSpace=wrap;html=1;fontSize=12;shape=note;size=14;fillColor=#fffde7;strokeColor=#bdb76b;align=left;spacingLeft=8;spacingRight=8;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="1225" width="360" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-b3" value="③ レビュー" style="whiteSpace=wrap;html=1;fontSize=14;rounded=0;dashed=1;fillColor=none;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=8;spacingTop=2;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="90" y="1750" width="1590" height="935" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-round" value="ラウンド開始 (1 〜 --max-rounds、既定 3)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="370" y="1800" width="380" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-ci" value="CI 待ち (--local では行わない)&lt;br&gt;30 秒ごとに gh で読み直す&lt;br&gt;PR の HEAD がローカルと揃うまで結果を読まない" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="245" y="1900" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-rev" value="静的レビュー (レビューが要るときだけ)&lt;br&gt;レビュー担当のエージェント全員を同時に起動する&lt;br&gt;ファイルは書き換えない。must / should / nit を付け、&lt;br&gt;1 行目に「判定: must あり / なし」を書く" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="575" y="1900" width="300" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-join" value="両方が終わるまで待つ" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="410" y="2060" width="300" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_unp" value="push が 5 分以内に&lt;br&gt;PR へ反映されたか" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="2150" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-x_unp" value="failed: commit が push されていない" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="2175" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_stl" value="CI が 60 分以内に&lt;br&gt;終わったか" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="2285" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-h_stl" value="needs-human: CI が終わらない" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="2310" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_cif" value="CI は失敗したか" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="2420" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-savelog" value="失敗した CI のログを&lt;br&gt;ci-fail-N.log に保存する" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="120" y="2440" width="230" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_revf" value="レビュー担当が&lt;br&gt;全員失敗したか" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="2555" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-h_revf" value="needs-human: レビュー担当が全員失敗した" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="2580" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-f3" value="読み書きするファイル (.autopilot/)&lt;br&gt;&lt;br&gt;・review-N-&amp;lt;担当&amp;gt;.md ← レビュー担当の出力&lt;br&gt;・ci-fail-N.log ← 失敗した CI のログの末尾&lt;br&gt;・brief.md / decisions.md — レビュー担当が読む&lt;br&gt;   (理由を付けて見送られた指摘は繰り返さない)&lt;br&gt;・2 周目以降のレビューは、前回レビューした HEAD&lt;br&gt;   からの修正を中心に見る&lt;br&gt;&lt;br&gt;レビューは CI の結果を使わないので、並行できる。&lt;br&gt;CI が 3 分たっても登録されなければ、CI なしとして進む" style="whiteSpace=wrap;html=1;fontSize=12;shape=note;size=14;fillColor=#fffde7;strokeColor=#bdb76b;align=left;spacingLeft=8;spacingRight=8;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="1800" width="360" height="210" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-b4" value="④ 修正" style="whiteSpace=wrap;html=1;fontSize=14;rounded=0;dashed=1;fillColor=none;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=8;spacingTop=2;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="90" y="2705" width="1590" height="1065" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-collect" value="各レビューの 1 行目から must の有無を読む (読めなければ must あり)&lt;br&gt;inbox.md に追加指示があれば inbox-N.md に取り込む" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="330" y="2755" width="460" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_none" value="直すものが無いか&lt;br&gt;(must なし・CI 失敗なし・&lt;br&gt;追加指示なし)" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="400" y="2855" width="320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_first" value="1 周目か" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="920" y="2870" width="240" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-ok_none" value="done: 直すものが無い&lt;br&gt;(must の無いレビュー、または修正後の CI が通った)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="860" y="2760" width="360" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-fix" value="修正担当のエージェントを起動する (実装担当の会話の続き)&lt;br&gt;1 周目: must と should を直す / 2 周目以降: must だけを直す&lt;br&gt;CI の失敗は必ず直す。追加指示は最優先&lt;br&gt;直したら commit → push。直すものが無ければ何も変えない" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="330" y="3035" width="460" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_fixok" value="修正担当は&lt;br&gt;正常終了したか" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="3175" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-x_fix" value="failed: 修正担当が異常終了した" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="3200" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_moved" value="修正が commit されたか&lt;br&gt;(HEAD が進んだか)" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="3390" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_cilog" value="CI が&lt;br&gt;失敗していたか" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="920" y="3390" width="240" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-ok_nofix" value="done: 直すものが無かった" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="3290" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-h_cifix" value="needs-human: CI の失敗を直せなかった" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="3540" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-d_max" value="ラウンドが&lt;br&gt;残っているか" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="410" y="3640" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-h_max" value="needs-human: 修正ループが上限に達した" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="880" y="3665" width="320" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-nextr" value="次のラウンドへ&lt;br&gt;must か追加指示があったときだけ&lt;br&gt;再レビューする。&lt;br&gt;それ以外は CI だけ確かめる" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="120" y="3650" width="230" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-f4" value="読み書きするファイル (.autopilot/)&lt;br&gt;&lt;br&gt;・review-N-*.md / ci-fail-N.log / inbox-N.md&lt;br&gt;   — 修正担当が読む&lt;br&gt;・decisions.md ← must を見送るときに理由を書く&lt;br&gt;・nit と直さなかった指摘は、要約で人間に渡す" style="whiteSpace=wrap;html=1;fontSize=12;shape=note;size=14;fillColor=#fffde7;strokeColor=#bdb76b;align=left;spacingLeft=8;spacingRight=8;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="3035" width="360" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-b5" value="⑤ 要約と終了" style="whiteSpace=wrap;html=1;fontSize=14;rounded=0;dashed=1;fillColor=none;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=8;spacingTop=2;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="90" y="3790" width="1590" height="680" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-a_d" value="結果は failed か" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="430" y="3915" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-a_skip" value="要約しない&lt;br&gt;(failed の理由だけが残る)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="920" y="3935" width="240" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-a_sum" value="要約担当のエージェントを起動する&lt;br&gt;result.md を書き、PR の本文を同じ内容で更新する&lt;br&gt;(何をしたか・主な判断と理由・見送った指摘・人間の判断が必要なこと)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="330" y="4035" width="460" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-a_st" value="status に結果を書く (done / needs-human: 理由 / failed: 理由)&lt;br&gt;result.md が無ければ代わりの文面を書く。run.pid を消す&lt;br&gt;終了コード: failed は 1、ほかは 0" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="330" y="4150" width="460" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-a_wake" value="autopilot-run プロセスの終了で窓口が起こされ、&lt;br&gt;status と result.md を読んで人間に報告する" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#d5f0ee;strokeColor=#4a9a94;" vertex="1" parent="1">
+          <mxGeometry x="330" y="4270" width="460" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-a_merge" value="人間が PR を確かめてマージする (マージは常に人間)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="330" y="4375" width="460" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-f5" value="読み書きするファイル (.autopilot/)&lt;br&gt;&lt;br&gt;・result.md ← 要約担当が書く。窓口が読む&lt;br&gt;・status ← 最後の 1 行が結果になる&lt;br&gt;・brief.md / decisions.md / review-*.md&lt;br&gt;   — 要約担当が読む" style="whiteSpace=wrap;html=1;fontSize=12;shape=note;size=14;fillColor=#fffde7;strokeColor=#bdb76b;align=left;spacingLeft=8;spacingRight=8;verticalAlign=top;spacingTop=4;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="4045" width="360" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-lg" value="凡例" style="whiteSpace=wrap;html=1;fontSize=14;rounded=0;dashed=1;fillColor=none;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=8;spacingTop=2;fontStyle=1;fontColor=#333333;" vertex="1" parent="1">
+          <mxGeometry x="1720" y="70" width="340" height="460" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-lg0" value="人間" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="108" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-lg1" value="窓口エージェント (autopilot スキルを使う側)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#d5f0ee;strokeColor=#4a9a94;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="160" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-lg2" value="autopilot-run プロセスの処理" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="212" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-lg3" value="担当エージェント (autopilot-run プロセスが起動する)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=12;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="264" width="300" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-lg4" value="分岐" style="whiteSpace=wrap;html=1;fontSize=12;rhombus;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="316" width="300" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-lg5" value="done" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="368" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-lg6" value="needs-human (人間に戻す)" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="420" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-lg7" value="failed / 起動の拒否" style="whiteSpace=wrap;html=1;fontSize=12;rounded=1;arcSize=50;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="472" width="300" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e0" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-ask" target="flow-spec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-spec" target="flow-d_reply">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e2" value="「一緒に」「見ながら」" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_reply" target="flow-together">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e3" value="同意 (OK・進めて 等)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_reply" target="flow-skill">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e4" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-skill" target="flow-d_brief">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e5" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_brief" target="flow-x_brief">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e6" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_brief" target="flow-d_running">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e7" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_running" target="flow-x_running">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e8" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_running" target="flow-d_rev">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e9" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_rev" target="flow-x_rev">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e10" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_rev" target="flow-d_branch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e11" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_branch" target="flow-x_branch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e12" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_branch" target="flow-prep">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e13" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-x_brief" target="flow-x_end">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e14" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-x_running" target="flow-x_end">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e15" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-x_rev" target="flow-x_end">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e16" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-x_branch" target="flow-x_end">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e17" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-prep" target="flow-d_from">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e18" value="implement (既定)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_from" target="flow-impl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e19" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-impl" target="flow-d_implok">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e20" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_implok" target="flow-x_impl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e21" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_implok" target="flow-d_pr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e22" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_pr" target="flow-x_pr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e23" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_pr" target="flow-round">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e24" value="review (実装を飛ばす)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.25;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_from" target="flow-round">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="70" y="1275" />
+              <mxPoint x="70" y="1812" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e25" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-round" target="flow-ci">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e26" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-round" target="flow-rev">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e27" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-ci" target="flow-join">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e28" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-rev" target="flow-join">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e29" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-join" target="flow-d_unp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e30" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_unp" target="flow-x_unp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e31" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_unp" target="flow-d_stl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e32" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_stl" target="flow-h_stl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e33" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_stl" target="flow-d_cif">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e34" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_cif" target="flow-savelog">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e35" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_cif" target="flow-d_revf">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e36" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-savelog" target="flow-d_revf">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e37" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_revf" target="flow-h_revf">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e38" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_revf" target="flow-collect">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e39" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-collect" target="flow-d_none">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e40" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_none" target="flow-d_first">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e41" value="いいえ (2 周目以降)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_first" target="flow-ok_none">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e42" value="はい (1 周目は should も直す)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_first" target="flow-fix">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e43" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_none" target="flow-fix">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e44" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-fix" target="flow-d_fixok">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e45" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_fixok" target="flow-x_fix">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e46" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_fixok" target="flow-d_moved">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e47" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_moved" target="flow-d_cilog">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e48" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_cilog" target="flow-ok_nofix">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e49" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_cilog" target="flow-h_cifix">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e50" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_moved" target="flow-d_max">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e51" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_max" target="flow-h_max">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e52" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-d_max" target="flow-nextr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e53" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-nextr" target="flow-round">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="50" y="3690" />
+              <mxPoint x="50" y="1836" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e54" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-x_impl" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e55" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-x_pr" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e56" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-x_unp" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e57" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-h_stl" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e58" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-h_revf" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e59" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-ok_none" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e60" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-x_fix" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e61" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-ok_nofix" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e62" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-h_cifix" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e63" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;" edge="1" parent="1" source="flow-h_max" target="flow-a_d">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1250" y="3860" />
+              <mxPoint x="560" y="3860" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="flow-e64" value="はい" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-a_d" target="flow-a_skip">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e65" value="いいえ" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-a_d" target="flow-a_sum">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e66" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-a_skip" target="flow-a_st">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e67" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-a_sum" target="flow-a_st">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e68" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-a_st" target="flow-a_wake">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="flow-e69" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;fontSize=11;endArrow=block;endFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="flow-a_wake" target="flow-a_merge">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
