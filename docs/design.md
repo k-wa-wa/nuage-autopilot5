@@ -38,6 +38,12 @@ v5 は作業場を Orca サーバーに移す。セッション・worktree・UI�
 | `src/` | `autopilot-run`。順序と待ちを持ち、判断は LLM に任せる |
 | `nix/module.nix` | `autopilot-run` を入れ、`home/` を各エージェントの読み込み先へ symlink する。共通ルールの後ろにはホストが渡すルール（`extraRules`、人間個人の約束など）を足す |
 
+流れと分岐は、次の図（drawio）に描いてある。
+
+- [autopilot-flow.drawio](./autopilot-flow.drawio): 仕様合意から、`autopilot-run` の自走、報告まで
+- [autopilot-model-switching.drawio](./autopilot-model-switching.drawio): 担当の実行が失敗したときの、モデルの切り替え
+- [autopilot-interrupts.drawio](./autopilot-interrupts.drawio): 自走中に人間が窓口へ話しかけたときの対応
+
 ### 通知
 
 Orca はエージェントがターンを終えると人間に通知する。窓口は任せた直後にターンを終え、`autopilot-run` の完了で起こされて報告するので、通知は「任せた時」と「終わった時」だけになる。`autopilot-run` は `ORCA_*` を外して子を起動し、途中で通知を鳴らさない。
