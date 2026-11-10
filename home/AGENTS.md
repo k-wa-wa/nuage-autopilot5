@@ -24,6 +24,10 @@
   - タイトルはサイドバーや一覧で読みやすいよう、20文字以内の簡潔な日本語にする（例: `SDNメッシュ修復`、`Trivy脆弱性対応`）。
   - ブランチ名は Conventional Branch のプレフィックス（`feat/`, `fix/`, `docs/`, `refactor/`, `chore/` 等）を付けた英語ケバブケースにする（例: `fix/sdn-mesh`, `feat/cost-watcher`, `docs/orca-branch-rule`）。
   - 対話の中で作業方針が大きく変わった場合は、タイトルやブランチ名も適宜更新する。
+- 関連作業や別リポジトリの作業で新しいワークツリーを立ち上げる際は、現在のワークツリーの子として立ち上げる。
+  ```bash
+  orca worktree create --repo <repo> --name <name> --parent-worktree active
+  ```
 
 ## GitHub
 
