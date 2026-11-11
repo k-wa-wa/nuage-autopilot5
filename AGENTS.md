@@ -26,7 +26,7 @@ nix build path:.#autopilot-run
 |---|---|
 | `packages/<pkg>/src/<module>.test.ts` | モジュールごとの振る舞い |
 | `packages/autopilot-run/src/pipeline.test.ts` | 流れ（順序・待ち・成否）。エージェント・GitHub・時計は `pipelineHarness` の偽物を使う |
-| `packages/autopilot-run/src/e2e.test.ts` | `autopilot-run` を別プロセスで丸ごと動かす。本物の git と、偽の claude / agy / gh（`fakeWorld`）を使う |
+| `packages/autopilot-run/src/e2e.test.ts` | `autopilot-run` を別プロセスで丸ごと動かす。本物の git と、偽の claude / agy / codex / gh（`fakeWorld`）を使う |
 | `packages/autopilot-run/src/invariants.test.ts` | 下の「設計の約束」と `home/` のルール。散文で宣言した規則がコードで強制されているかを確かめる |
 | `packages/<pkg>/src/regressions.test.ts` | 実際に踏んだ欠陥。型では防げず、動かして初めて分かったもの |
 
@@ -39,7 +39,7 @@ nix build path:.#autopilot-run
 - 流れ（順序と待ち）は `packages/autopilot-run/src/pipeline.ts` だけが持つ。判断は LLM に任せ、コードに分岐を足さない。
 - エージェント CLI ごとの違いは `packages/autopilot-run/src/agents.ts` だけに、gh の呼び出しは `packages/autopilot-run/src/github.ts` だけに、CI の判定は `packages/autopilot-run/src/ci.ts` だけに閉じる。
 - 作業ごとの賢さは `packages/autopilot-run/src/models.ts` だけが決める。実在のモデル名はコード・テスト・`home/` に書かず、ホストの `models.yaml` だけに書く。
-- モデルを切り替えるのは、失敗して作業ツリーが何も変わっていないときだけにする。
+- モデル・エージェントを切り替えるのは、認証切れ・利用上限・会話切れで失敗して作業ツリーが何も変わっていないときだけにする。実装に成功した担当は修正でも維持し、再開に失敗したら停止する。
 - 成否はエージェントの自己申告ではなく、commit・PR・push が実際にできたかで判定する。
 - GitHub の状態は push 直後に揃わない。PR の HEAD がローカルと一致するまで CI の結果を読まない。
 - 窓口とのやりとりは `.autopilot/` のファイルだけで行う。

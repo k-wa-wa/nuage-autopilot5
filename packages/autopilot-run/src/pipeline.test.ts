@@ -1,10 +1,72 @@
 import { describe, expect, test } from "bun:test";
 import { CI_LIMITS } from "./ci.ts";
+import { assignRoles } from "./models.ts";
 import { reviewFileName, runPipeline } from "./pipeline.ts";
 import { VERDICT } from "./prompts.ts";
 import { assignee, checks, pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
-const cfg = pipelineConfig(assignee("claude"), [assignee("agy"), assignee("copilot")]);
+const cfg = pipelineConfig(assignee("claude"), [assignee("agy"), assignee("codex")]);
+
+describe("担当 CLI の切り替えと維持", () => {
+  const defaults = { ...cfg, ...assignRoles({ level: "high" }, {}) };
+
+  test("利用不能の実装担当を順に試し、成功した担当・会話を修正でも維持する", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      failAgent: (inv, kind) => kind === "implement" && inv.agent === "agy",
+    });
+    expect(await runPipeline(defaults, h.deps)).toEqual({ kind: "done" });
+    expect(
+      h.calls.filter((c) => c.kind === "implement").map((c) => [c.inv.agent, c.session]),
+    ).toEqual([
+      ["agy", { kind: "start" }],
+      ["codex", { kind: "start" }],
+    ]);
+    const fix = h.calls.find((c) => c.kind === "fix")!;
+    expect(fix.inv.agent).toBe("codex");
+    expect(fix.session).toEqual({ kind: "resume", id: "conv1" });
+  });
+
+  test("通常の異常終了や通信障害では次の CLI を試さない", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      failure: "error",
+      failAgent: (_, k) => k === "implement",
+    });
+    expect((await runPipeline(defaults, h.deps)).kind).toBe("failed");
+    expect(h.calls.map((c) => c.inv.agent)).toEqual(["agy"]);
+  });
+
+  test("変更途中の利用不能では次の CLI に切り替えない", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      failAgent: (_, k) => k === "implement",
+      dirtyOnFail: () => true,
+    });
+    expect((await runPipeline(defaults, h.deps)).kind).toBe("failed");
+    expect(h.calls.map((c) => c.inv.agent)).toEqual(["agy"]);
+  });
+
+  test("レビューは claude → codex → agy。実装と同じ CLI の別会話も許容する", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      failAgent: (inv, kind) => kind === "review" && inv.agent !== "agy",
+    });
+    expect((await runPipeline(defaults, h.deps)).kind).toBe("done");
+    const reviews = h.calls.filter((c) => c.kind === "review");
+    expect(reviews.map((c) => c.inv.agent)).toEqual(["claude", "codex", "agy"]);
+    expect(reviews.every((c) => c.session === undefined)).toBe(true);
+  });
+
+  test("修正時に利用上限に達したら、変更がなくても別担当へ切り替えない", async () => {
+    const h = pipelineHarness({ commits: [true], failAgent: (_, kind) => kind === "fix" });
+    expect(await runPipeline(defaults, h.deps)).toEqual({
+      kind: "failed",
+      reason: "修正担当が異常終了した",
+    });
+    expect(h.calls.filter((c) => c.kind === "fix").map((c) => c.inv.agent)).toEqual(["agy"]);
+  });
+});
 
 describe("runPipeline: 基本の流れ", () => {
   test("実装 → レビュー → 直すもの無しで完了し、最後に要約する", async () => {
@@ -13,7 +75,7 @@ describe("runPipeline: 基本の流れ", () => {
     expect(h.calls.map((c) => `${c.inv.agent}:${c.kind}`)).toEqual([
       "claude:implement",
       "agy:review",
-      "copilot:review",
+      "codex:review",
       "claude:fix",
       "claude:summarize",
     ]);
@@ -24,11 +86,11 @@ describe("runPipeline: 基本の流れ", () => {
     await runPipeline(cfg, h.deps);
     expect(h.calls.filter((c) => c.kind === "review").map((c) => c.output)).toEqual([
       "review-1-agy.md",
-      "review-1-copilot.md",
+      "review-1-codex.md",
     ]);
     const fix = h.calls.find((c) => c.kind === "fix")!;
     expect(fix.prompt).toContain(".autopilot/review-1-agy.md");
-    expect(fix.prompt).toContain(".autopilot/review-1-copilot.md");
+    expect(fix.prompt).toContain(".autopilot/review-1-codex.md");
   });
 
   test("人間の追加指示は修正のプロンプトに渡す", async () => {
@@ -334,7 +396,7 @@ describe("runPipeline: レビュー担当の失敗", () => {
     expect(await runPipeline(cfg, h.deps)).toEqual({ kind: "done" });
     const fix = h.calls.find((c) => c.kind === "fix")!;
     expect(fix.prompt).not.toContain("review-1-agy.md");
-    expect(fix.prompt).toContain("review-1-copilot.md");
+    expect(fix.prompt).toContain("review-1-codex.md");
   });
 
   test("全員が落ちたら、レビュー無しで完了にせず人間に戻す", async () => {

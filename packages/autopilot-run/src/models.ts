@@ -34,7 +34,19 @@ const FIXED_LEVELS = { review: "high", summarize: "light" } as const satisfies R
 export const MODELS_PATH = "/etc/autopilot5/models.yaml";
 
 /** エージェント → 段階 → 前から順に試すモデル。 */
-export type ModelTable = Partial<Record<AgentName, Partial<Record<Level, ModelChoice[]>>>>;
+export interface RoleTable {
+  impl?: AgentName[];
+  review?: AgentName[];
+}
+
+export const DEFAULT_ROLES = {
+  impl: ["agy", "codex", "claude"],
+  review: ["claude", "codex", "agy"],
+} as const satisfies Record<keyof RoleTable, readonly AgentName[]>;
+
+export type ModelTable = Partial<Record<AgentName, Partial<Record<Level, ModelChoice[]>>>> & {
+  roles?: RoleTable;
+};
 
 /** models.yaml を読む。書き間違いは黙って無視せず、場所を添えて拒否する。 */
 export function parseModelTable(text: string): ModelTable {
@@ -44,6 +56,26 @@ export function parseModelTable(text: string): ModelTable {
 
   const table: ModelTable = {};
   for (const [agent, levels] of Object.entries(raw)) {
+    if (agent === "roles") {
+      if (!isRecord(levels)) throw new Error("models.yaml: roles は impl / review の表で書く");
+      const roles: RoleTable = {};
+      for (const [role, agents] of Object.entries(levels)) {
+        if (role !== "impl" && role !== "review")
+          throw new Error(`models.yaml: 知らない担当: roles.${role}`);
+        if (
+          !Array.isArray(agents) ||
+          agents.length === 0 ||
+          agents.some((a) => !AGENTS.includes(a)) ||
+          new Set(agents).size !== agents.length
+        )
+          throw new Error(
+            `models.yaml: roles.${role} は ${AGENTS.join(" / ")} を重複なく 1 つ以上並べる`,
+          );
+        roles[role] = agents;
+      }
+      table.roles = roles;
+      continue;
+    }
     if (!AGENTS.includes(agent as AgentName)) {
       throw new Error(`models.yaml: 知らないエージェント: ${agent}（${AGENTS.join(" / ")}）`);
     }
@@ -102,24 +134,40 @@ export interface Assignment {
 
 /** 作業ごとに、誰がどのモデルの並びで行うかを決める。 */
 export function assignRoles(
-  opts: { impl: AgentSpec; reviewers: AgentSpec[]; level: Level },
+  opts: { impl?: AgentSpec; reviewers?: AgentSpec[]; level: Level },
   table: ModelTable,
 ): Assignment {
   const as = (spec: AgentSpec, level: Level): Assignee => ({
     name: formatAgentSpec(spec),
     chain: resolveChain(spec, level, table),
   });
+  const configured = (role: keyof RoleTable, level: Level): Assignee => {
+    const agents = table.roles?.[role] ?? DEFAULT_ROLES[role];
+    return {
+      name: agents[0]!,
+      chain: agents.flatMap((agent) => resolveChain({ agent, models: [] }, level, table)),
+    };
+  };
+  const implement = opts.impl ? as(opts.impl, opts.level) : configured("impl", opts.level);
   return {
-    implement: as(opts.impl, opts.level),
-    fix: as(opts.impl, opts.level),
-    summarize: as(opts.impl, FIXED_LEVELS.summarize),
-    reviewers: opts.reviewers.map((r) => as(r, FIXED_LEVELS.review)),
+    implement,
+    fix: implement,
+    summarize: opts.impl
+      ? as(opts.impl, FIXED_LEVELS.summarize)
+      : configured("impl", FIXED_LEVELS.summarize),
+    reviewers: opts.reviewers
+      ? opts.reviewers.map((r) => as(r, FIXED_LEVELS.review))
+      : [configured("review", FIXED_LEVELS.review)],
   };
 }
 
 /** `autopilot-run models` の表示。 */
 export function formatModelTable(table: ModelTable): string {
-  const lines: string[] = [];
+  const lines: string[] = [
+    "roles:",
+    `  impl     ${(table.roles?.impl ?? DEFAULT_ROLES.impl).join(" → ")}`,
+    `  review   ${(table.roles?.review ?? DEFAULT_ROLES.review).join(" → ")}`,
+  ];
   for (const agent of AGENTS) {
     const row = table[agent];
     if (!row) continue;

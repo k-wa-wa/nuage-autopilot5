@@ -36,6 +36,7 @@ describe("run", () => {
       logPath: log,
     });
     expect(r.code).toBe(0);
+    expect(r.stderr).toBe("warn\n");
     expect(readFileSync(out, "utf8")).toBe("指摘なし\n");
     expect(readFileSync(log, "utf8")).toBe("warn\n");
   });
@@ -74,6 +75,19 @@ describe("run", () => {
       delete process.env.ORCA_PANE_KEY;
     }
     expect(readFileSync(out, "utf8").trim()).toBe("");
+  });
+
+  test("利用上限を出力していても、シグナル終了は通常のエラーとして識別できる", async () => {
+    dir = tempDir();
+    const r = await run(
+      [BUN, "-e", "console.error('Rate limit exceeded'); process.kill(process.pid, 'SIGTERM')"],
+      {
+        cwd: dir.path,
+        logPath: join(dir.path, "run.log"),
+      },
+    );
+    expect(r.code).toBe(143);
+    expect(r.stderr).toContain("Rate limit exceeded");
   });
 
   test("killAll は子だけでなく孫（エージェントが起動したビルド等）も止める", async () => {

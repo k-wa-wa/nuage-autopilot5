@@ -24,7 +24,7 @@ describe("agy が --model をプロンプトとして読んだ", () => {
   // agy の -p は直後の引数をプロンプトとして読む。`agy -p --model m PROMPT` は
   // 「-p took "--model" as its prompt」になった。
   test("どのエージェントも -p の直後がプロンプト", () => {
-    for (const agent of ["claude", "agy", "copilot"] as const) {
+    for (const agent of ["claude", "agy"] as const) {
       expect(buildArgv({ agent, model: "m", effort: "high" }, "PROMPT").slice(-2)).toEqual([
         "-p",
         "PROMPT",
@@ -195,5 +195,28 @@ describe("レビューが仕様受入検査に偏り、ほぼ毎回「must な�
   test("1 行目が must なしでも should / nit を省略せず出させる", () => {
     const p = prompts.review({ baseSha: "abc", since: null });
     expect(p).toContain("should や nit があれば「指摘なし」とせず続けてすべて書く");
+  });
+});
+
+describe("切り替え先に別エージェントの会話 ID を渡さない", () => {
+  test("実装に成功した担当のモデルを維持し、修正の上限エラーで別 CLI に再開させない", async () => {
+    const writer = {
+      name: "agy",
+      chain: [
+        { agent: "agy" as const, model: "a1" },
+        { agent: "codex" as const, model: "x1" },
+        { agent: "claude" as const, model: "c1" },
+      ],
+    };
+    const h = pipelineHarness({
+      commits: [true],
+      failAgent: (inv, kind) => (kind === "implement" && inv.agent === "agy") || kind === "fix",
+    });
+    expect((await runPipeline(pipelineConfig(writer, [assignee("claude")]), h.deps)).kind).toBe(
+      "failed",
+    );
+    const fixes = h.calls.filter((c) => c.kind === "fix");
+    expect(fixes.map((c) => c.inv)).toEqual([{ agent: "codex", model: "x1" }]);
+    expect(fixes[0]!.session).toEqual({ kind: "resume", id: "conv1" });
   });
 });

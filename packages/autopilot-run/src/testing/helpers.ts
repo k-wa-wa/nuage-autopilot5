@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentName, Invocation } from "../agents.ts";
+import type { AgentName, FailureKind, Invocation } from "../agents.ts";
 import type { CheckBucket, PrSnapshot } from "../ci.ts";
 import type { GitHub } from "../github.ts";
 import type { Assignee } from "../models.ts";
@@ -58,6 +58,7 @@ export interface HarnessOptions {
     snapshots?: Array<(localHead: string) => PrSnapshot | null>;
   };
   inbox?: boolean;
+  failure?: FailureKind;
   failAgent?: (inv: Invocation, kind: PromptKind) => boolean;
   /** 失敗する前に作業ツリーを書き換えるか（途中まで書いて落ちた担当）。 */
   dirtyOnFail?: (inv: Invocation, kind: PromptKind) => boolean;
@@ -110,7 +111,7 @@ export function pipelineHarness(opts: HarnessOptions) {
       calls.push({ inv, kind, prompt, output, session, at: now });
       if (opts.failAgent?.(inv, kind)) {
         if (opts.dirtyOnFail?.(inv, kind)) dirty++;
-        return { ok: false, session: null };
+        return { ok: false, session: null, failure: opts.failure ?? "unavailable" };
       }
       if ((kind === "implement" || kind === "fix") && commits.shift()) head++;
       const id = !session
@@ -243,6 +244,7 @@ export type Action =
   | "pr"
   | "result"
   | "fail"
+  | "unavailable"
   | "hang"
   | `say:${string}`
   | `fail-if-model:${string}`;
@@ -285,9 +287,9 @@ if (Array.isArray(actions[0])) {
   actions = actions[Math.min(n, actions.length - 1)];
 }
 // --output-format json（agy の会話を引き継ぐ実行）では、本文を JSON に包み、会話 ID を返す。
-const json = args.includes("--output-format");
+const json = args.includes("--output-format") || args.includes("--json");
 const said = [];
-const conv = args.includes("--conversation") ? args[args.indexOf("--conversation") + 1] : "agy-conv-1";
+const conv = name === "codex" ? (args.includes("resume") ? args.at(-2) : "codex-conv-1") : args.includes("--conversation") ? args[args.indexOf("--conversation") + 1] : "agy-conv-1";
 const sh = (...args) => {
   const r = Bun.spawnSync(args, { stdio: ["ignore", "inherit", "inherit"] });
   if (r.exitCode !== 0) process.exit(r.exitCode ?? 1);
@@ -302,9 +304,10 @@ for (const a of actions) {
   else if (a === "pr") sh("gh", "pr", "create", "--fill");
   else if (a === "result") writeFileSync(".autopilot/result.md", "要約\\n");
   else if (a === "fail") process.exit(3);
+  else if (a === "unavailable") { console.error("Rate limit exceeded"); process.exit(3); }
   else if (a.startsWith("fail-if-model:")) {
     const i = args.indexOf("--model");
-    if (i !== -1 && args[i + 1] === a.slice("fail-if-model:".length)) process.exit(3);
+    if (i !== -1 && args[i + 1] === a.slice("fail-if-model:".length)) { console.error("Rate limit exceeded"); process.exit(3); }
   }
   else if (a === "hang") {
     const child = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 600000)"]);
@@ -312,7 +315,11 @@ for (const a of actions) {
     await new Promise(() => {});
   } else if (a.startsWith("say:")) json ? said.push(a.slice(4)) : console.log(a.slice(4));
 }
-if (json) console.log(JSON.stringify({ conversation_id: conv, status: "SUCCESS", response: said.join("\\n") }));
+if (name === "codex") {
+  console.log(JSON.stringify({ type: "thread.started", thread_id: conv }));
+  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: said.join("\\n") } }));
+  console.log(JSON.stringify({ type: "turn.completed", usage: {} }));
+} else if (json) console.log(JSON.stringify({ conversation_id: conv, status: "SUCCESS", response: said.join("\\n") }));
 `;
 
 const FAKE_GH = `
@@ -354,7 +361,7 @@ fail("fake gh: 未対応の呼び出し: " + args.join(" "));
 
 const MAIN = join(import.meta.dir, "..", "main.ts");
 
-/** 偽の claude / agy / copilot / gh と本物の git だけを置いた bin を作る。 */
+/** 偽の claude / agy / codex / gh と本物の git だけを置いた bin を作る。 */
 export function fakeWorld(root: string, agents: readonly string[] = ["claude", "agy"]): FakeWorld {
   const bin = join(root, "bin");
   const stateDir = join(root, "fake");

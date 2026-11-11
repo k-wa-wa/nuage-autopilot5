@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
+import { constants } from "node:os";
 
 /**
  * 子プロセスの実行。
@@ -31,6 +32,7 @@ export interface RunOptions {
 export interface RunResult {
   code: number;
   stdout: string;
+  stderr: string;
 }
 
 export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
@@ -46,21 +48,27 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
     });
     if (child.pid) active.add(child.pid);
     let stdout = "";
+    let stderr = "";
     // 窓口が進捗を読めるよう、溜めずに逐次書き出す。
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk;
       appendFileSync(opts.stdoutPath ?? opts.logPath, chunk);
     });
-    child.stderr.on("data", (chunk: Buffer) => appendFileSync(opts.logPath, chunk));
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk;
+      appendFileSync(opts.logPath, chunk);
+    });
     const done = (code: number) => {
       if (child.pid) active.delete(child.pid);
-      resolve({ code, stdout });
+      resolve({ code, stdout, stderr });
     };
     child.on("error", (e) => {
       appendFileSync(opts.logPath, `${cmd}: ${e.message}\n`);
       done(127);
     });
-    child.on("close", (code) => done(code ?? 1));
+    child.on("close", (code, signal) =>
+      done(code ?? (signal ? 128 + constants.signals[signal] : 1)),
+    );
   });
 }
 

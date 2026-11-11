@@ -35,10 +35,131 @@ function setup(opts: { branch?: string; brief?: boolean; agents?: string[] } = {
 }
 
 const main = (args: string[], extra: Record<string, string> = {}) =>
-  runMain(args, { cwd: env.repo.work, world: env.world, home: env.home, env: extra });
+  runMain(["--impl", "claude", "--reviewers", "agy", ...args], {
+    cwd: env.repo.work,
+    world: env.world,
+    home: env.home,
+    env: extra,
+  });
 
 const read = (name: string) => readFileSync(join(env.dir, name), "utf8");
 const status = () => read("status").trim();
+
+// 既存のケースは main() で担当を明示する。ここでは引数なしの運用設定も検証する。
+const configuredMain = (args: string[] = ["--local"]) =>
+  runMain(args, { cwd: env.repo.work, world: env.world, home: env.home });
+
+describe("既定の担当と Codex", () => {
+  test(
+    "指定なしでは実装 agy、レビュー claude の 1 担当で動く",
+    async () => {
+      setup();
+      env.world.scripts({
+        agy: { implement: ["commit"], fix: [], summarize: ["result"] },
+        claude: { review: ["say:判定: must なし"] },
+      });
+      expect((await configuredMain()).code).toBe(0);
+      expect(env.world.calls().map((c) => `${c.name}:${c.kind}`)).toEqual([
+        "agy:implement",
+        "claude:review",
+        "agy:fix",
+        "agy:summarize",
+      ]);
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "利用不能なら Codex に切り替え、本文を保存し、修正では成功した Codex の会話を再開する",
+    async () => {
+      setup({ agents: ["agy", "claude", "codex"] });
+      env.world.scripts({
+        agy: { implement: ["unavailable"] },
+        claude: { review: ["unavailable"] },
+        codex: {
+          implement: ["commit"],
+          review: ["say:判定: must なし\n確かめたこと: 差分"],
+          fix: [],
+          summarize: ["result"],
+        },
+      });
+      expect((await configuredMain()).code).toBe(0);
+      expect(env.world.calls().map((c) => `${c.name}:${c.kind}`)).toEqual([
+        "agy:implement",
+        "codex:implement",
+        "claude:review",
+        "codex:review",
+        "codex:fix",
+        "codex:summarize",
+      ]);
+      const fix = env.world.calls().find((c) => c.kind === "fix")!;
+      expect(fix.args).toContain("resume");
+      expect(fix.args).toContain("codex-conv-1");
+      const review = env.world.calls().find((c) => c.name === "codex" && c.kind === "review")!;
+      expect(review.args).not.toContain("resume");
+      expect(read("review-1-claude.md")).toBe("判定: must なし\n確かめたこと: 差分");
+      expect(read("result.md")).toBe("要約\n");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "models.yaml の担当順を使い、--impl codex / --reviewers codex で独立に上書きできる",
+    async () => {
+      setup({ agents: ["agy", "claude", "codex"] });
+      writeFileSync(
+        join(env.home, "models.yaml"),
+        "roles:\n  impl: [claude, agy]\n  review: [agy]\ncodex:\n  high: [x@high]\n",
+      );
+      env.world.scripts({
+        codex: {
+          implement: ["commit"],
+          review: ["say:判定: must なし"],
+          fix: [],
+          summarize: ["result"],
+        },
+      });
+      expect(
+        (await configuredMain(["--local", "--impl", "codex", "--reviewers", "codex"])).code,
+      ).toBe(0);
+      expect(env.world.calls().every((c) => c.name === "codex")).toBe(true);
+      expect(env.world.calls()[0]!.args).toContain('model_reasoning_effort="high"');
+      expect(read("review-1-codex.md")).toBe("判定: must なし");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "roles だけを設定しても反映され、モデル名の定義は必須にしない",
+    async () => {
+      setup();
+      writeFileSync(join(env.home, "models.yaml"), "roles:\n  impl: [claude]\n  review: [agy]\n");
+      env.world.scripts({
+        claude: { implement: ["commit"], fix: [], summarize: ["result"] },
+        agy: { review: ["say:判定: must なし"] },
+      });
+      expect((await configuredMain()).code).toBe(0);
+      expect(env.world.calls()[0]!.name).toBe("claude");
+      expect(env.world.calls()[1]!.name).toBe("agy");
+    },
+    TIMEOUT,
+  );
+
+  for (const changed of [false, true]) {
+    test(
+      changed
+        ? "変更後の利用不能では代替 CLI を起動しない"
+        : "通常の異常終了では代替 CLI を起動しない",
+      async () => {
+        setup({ agents: ["agy", "claude", "codex"] });
+        env.world.scripts({ agy: { implement: changed ? ["commit", "unavailable"] : ["fail"] } });
+        expect((await configuredMain()).code).toBe(1);
+        expect(env.world.calls().map((c) => c.name)).toEqual(["agy"]);
+      },
+      TIMEOUT,
+    );
+  }
+});
 
 describe("--local", () => {
   test(
@@ -190,12 +311,16 @@ describe("起動前の確認", () => {
   );
 
   test(
-    "レビュー担当が見つからなければ起動しない",
+    "既定担当の CLI が無ければ起動しない",
     async () => {
       setup({ agents: ["claude"] });
-      const r = await main(["--local"]);
+      const r = await runMain(["--local"], {
+        cwd: env.repo.work,
+        world: env.world,
+        home: env.home,
+      });
       expect(r.code).toBe(2);
-      expect(r.stderr).toContain("レビュー担当がいない");
+      expect(r.stderr).toContain("CLI が PATH にない: agy");
     },
     TIMEOUT,
   );
@@ -218,7 +343,11 @@ describe("stop", () => {
     async () => {
       setup();
       env.world.scripts({ claude: { implement: ["hang"] }, agy: { review: ["say:指摘なし"] } });
-      const p = spawnMain(["--local"], { cwd: env.repo.work, world: env.world, home: env.home });
+      const p = spawnMain(["--local", "--impl", "claude", "--reviewers", "agy"], {
+        cwd: env.repo.work,
+        world: env.world,
+        home: env.home,
+      });
 
       const gcFile = join(env.world.stateDir, "grandchild.pid");
       for (let i = 0; i < 200 && !existsSync(gcFile); i++) await Bun.sleep(50);
@@ -498,10 +627,10 @@ agy:
 
       const opts = { cwd: env.home, world: env.world, home: env.home };
       const bad = join(env.home, "bad.yaml");
-      writeFileSync(bad, "codex:\n  high: [x]\n");
+      writeFileSync(bad, "copilot:\n  high: [x]\n");
       const checked = await runMain(["models", "--file", bad], opts);
       expect(checked.code).toBe(2);
-      expect(checked.stderr).toContain("知らないエージェント: codex");
+      expect(checked.stderr).toContain("知らないエージェント: copilot");
       const missing = await runMain(["models", "--file", join(env.home, "none.yaml")], opts);
       expect(missing.code).toBe(2);
     },

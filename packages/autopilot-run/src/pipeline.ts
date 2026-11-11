@@ -1,4 +1,4 @@
-import { formatInvocation, type Invocation } from "./agents.ts";
+import { type FailureKind, formatInvocation, type Invocation } from "./agents.ts";
 import { type CiVerdict, judgeCi } from "./ci.ts";
 import type { GitHub } from "./github.ts";
 import type { Assignee, Assignment } from "./models.ts";
@@ -20,7 +20,7 @@ import * as prompts from "./prompts.ts";
  * 順序と待ちはここが持ち、判断は LLM に任せる。
  * 成否はエージェントの自己申告ではなく、commit・PR・push が実際にできたかで判定する。
  *
- * 担当はモデルの並びを持ち、失敗したら次のモデルで試し直す（利用上限・認証切れ・モデルの廃止）。
+ * 担当はモデルの並びを持ち、失敗したら次のモデルで試し直す（利用上限・認証切れ・会話切れ）。
  * ただしコードを書き換える作業は、途中まで書き換えて落ちたなら試し直さない。別のモデルが続きを書くと混ざる。
  */
 
@@ -44,6 +44,9 @@ export interface AgentRun {
   ok: boolean;
   /** session を渡したときの会話 ID。読めなければ null。 */
   session: string | null;
+  failure?: FailureKind;
+  /** 成功した実行。修正担当を固定するため Runner が付ける。 */
+  invocation?: Invocation;
 }
 
 export interface Deps {
@@ -92,7 +95,7 @@ export function reviewFileName(reviewer: Assignee, round: number): string {
 
 /** 担当を、モデルの並びの前から順に試す。 */
 class Runner {
-  /** 失敗したモデル。利用上限は数時間〜数日戻らないので、この実行の間は後回しにする。 */
+  /** 利用不能になったモデル。この実行の間は再利用しない。 */
   private readonly failed = new Set<string>();
 
   constructor(private readonly d: Deps) {}
@@ -106,13 +109,12 @@ class Runner {
     opts: { writes: boolean; output?: string; session?: SessionPlan },
   ): Promise<AgentRun> {
     const failed: AgentRun = { ok: false, session: null };
-    const fresh = who.chain.filter((inv) => !this.failed.has(formatInvocation(inv)));
-    // 全部が一度失敗していても、あきらめる前にもう一度だけ並びどおりに試す。
-    const order = fresh.length > 0 ? fresh : who.chain;
+    const order = who.chain.filter((inv) => !this.failed.has(formatInvocation(inv)));
     for (const [i, inv] of order.entries()) {
       const before = opts.writes ? await this.d.fingerprint() : "";
       const r = await this.d.runAgent(inv, prompt, { output: opts.output, session: opts.session });
-      if (r.ok) return r;
+      if (r.ok) return { ...r, invocation: inv };
+      if (r.failure !== "unavailable") return failed;
       this.failed.add(formatInvocation(inv));
       const next = order[i + 1];
       if (!next) break;
@@ -134,6 +136,7 @@ class Runner {
  */
 class Writer {
   private session: string | null = null;
+  private invocation: Invocation | null = null;
 
   constructor(
     private readonly d: Deps,
@@ -144,7 +147,11 @@ class Writer {
     const plan: SessionPlan = this.session
       ? { kind: "resume", id: this.session }
       : { kind: "start" };
-    const r = await this.runner.run(who, prompt, { writes: true, session: plan });
+    // 一度成功した実装・修正担当は固定する。別 CLI に会話 ID を渡さない。
+    const r = this.invocation
+      ? await this.d.runAgent(this.invocation, prompt, { session: plan })
+      : await this.runner.run(who, prompt, { writes: true, session: plan });
+    if (r.ok && r.invocation) this.invocation = r.invocation;
     if (r.ok && !r.session)
       this.d.state.log("会話 ID を読めなかった。次の修正は新しい会話で始める");
     this.session = r.ok ? r.session : this.session;

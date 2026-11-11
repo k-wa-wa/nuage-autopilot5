@@ -56,13 +56,13 @@ describe("プロンプト", () => {
     const p = prompts.fix({
       mode: "pr",
       scope: "must-should",
-      reviews: [".autopilot/review-1-agy.md", ".autopilot/review-1-copilot.md"],
+      reviews: [".autopilot/review-1-agy.md", ".autopilot/review-1-codex.md"],
       ciLog: ".autopilot/ci-fail-1.log",
       inbox: ".autopilot/inbox-1.md",
     });
     expect(p).toContain("人間からの追加指示: .autopilot/inbox-1.md（最優先）");
     expect(p).toContain("CI の失敗ログ: .autopilot/ci-fail-1.log（必ず直す）");
-    expect(p).toContain(".autopilot/review-1-agy.md, .autopilot/review-1-copilot.md");
+    expect(p).toContain(".autopilot/review-1-agy.md, .autopilot/review-1-codex.md");
     expect(all.fix).not.toContain("追加指示");
     expect(all.fix).not.toContain("CI の失敗ログ");
   });

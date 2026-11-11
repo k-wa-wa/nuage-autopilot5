@@ -41,7 +41,9 @@ describe("parseModelTable", () => {
   });
 
   test("書き間違いは場所を添えて拒否する（黙って既定モデルにしない）", () => {
-    expect(() => parseModelTable("codex:\n  high: [m]\n")).toThrow(/知らないエージェント: codex/);
+    expect(() => parseModelTable("unsupported:\n  high: [m]\n")).toThrow(
+      /知らないエージェント: unsupported/,
+    );
     expect(() => parseModelTable("claude:\n  hgih: [m]\n")).toThrow(/知らない段階: hgih/);
     expect(() => parseModelTable("claude:\n  high: m\n")).toThrow(/claude\.high/);
     expect(() => parseModelTable("claude:\n  high: []\n")).toThrow(/1 つ以上/);
@@ -87,7 +89,7 @@ describe("resolveChain", () => {
 
   test("表に無ければ CLI の既定モデルで 1 回だけ試す", () => {
     expect(resolveChain(parseAgentSpec("agy"), "light", table)).toEqual([{ agent: "agy" }]);
-    expect(resolveChain(parseAgentSpec("copilot"), "high", {})).toEqual([{ agent: "copilot" }]);
+    expect(resolveChain(parseAgentSpec("codex"), "high", {})).toEqual([{ agent: "codex" }]);
   });
 });
 
@@ -123,6 +125,9 @@ describe("formatModelTable", () => {
   test("段階ごとに試す順で表示する", () => {
     expect(formatModelTable(parseModelTable(YAML))).toBe(
       [
+        "roles:",
+        "  impl     agy → codex → claude",
+        "  review   claude → codex → agy",
         "claude:",
         "  high     model-big@high",
         "  standard model-mid@medium",
@@ -131,5 +136,54 @@ describe("formatModelTable", () => {
         "  high     model-x-high → model-y-high",
       ].join("\n"),
     );
+  });
+});
+
+describe("担当の優先順", () => {
+  test("設定なしでは実装 agy → codex → claude、レビュー claude → codex → agy", () => {
+    const roles = assignRoles({ level: "high" }, {});
+    expect(roles.implement.chain.map((i) => i.agent)).toEqual(["agy", "codex", "claude"]);
+    expect(roles.reviewers).toHaveLength(1);
+    expect(roles.reviewers[0]!.chain.map((i) => i.agent)).toEqual(["claude", "codex", "agy"]);
+    expect(roles.summarize.chain.map((i) => i.agent)).toEqual(["agy", "codex", "claude"]);
+  });
+
+  test("担当順を上書きし、各担当内では段階のモデル順を使う", () => {
+    const table = parseModelTable(
+      `${YAML}\nroles:\n  impl: [codex, agy]\n  review: [agy, claude]\ncodex:\n  high: [x@high, y@high]\n`,
+    );
+    const roles = assignRoles({ level: "high" }, table);
+    expect(roles.implement.chain).toEqual([
+      { agent: "codex", model: "x", effort: "high" },
+      { agent: "codex", model: "y", effort: "high" },
+      { agent: "agy", model: "model-x-high" },
+      { agent: "agy", model: "model-y-high" },
+    ]);
+    expect(roles.reviewers[0]!.chain.map((i) => i.agent)).toEqual(["agy", "agy", "claude"]);
+    expect(roles.summarize.chain).toEqual([{ agent: "codex" }, { agent: "agy" }]);
+    expect(formatModelTable(table)).toContain("impl     codex → agy");
+  });
+
+  test("明示指定は設定の代替 CLI を追加しない", () => {
+    const roles = assignRoles(
+      { impl: parseAgentSpec("codex"), reviewers: [parseAgentSpec("codex")], level: "high" },
+      {},
+    );
+    expect(roles.implement.chain).toEqual([{ agent: "codex" }]);
+    expect(roles.reviewers[0]!.chain).toEqual([{ agent: "codex" }]);
+  });
+
+  test("担当の誤記・空・重複・Copilot は起動前に拒否する", () => {
+    for (const text of [
+      "roles: []",
+      "roles:\n  fix: [agy]",
+      "roles:\n  impl: []",
+      "roles:\n  impl: agy",
+      "roles:\n  review: [copilot]",
+      "roles:\n  impl: [agy, agy]",
+      "roles:\n  impl: [null]",
+    ]) {
+      expect(() => parseModelTable(text)).toThrow(/roles/);
+    }
   });
 });
