@@ -137,25 +137,51 @@ export function classifyFailure(
   if (result.code === 0 && !errors.some((e) => e.type === "turn.failed")) return null;
   // 終了シグナル・CLI 未導入は、出力の内容にかかわらず停止する。
   if (result.code === 127 || result.code >= 128) return "error";
-  const diagnostic = [
-    result.stderr,
-    agent === "codex"
-      ? errors
-          .map((e) => {
-            const error = isRecord(e.error) ? e.error : e;
-            return typeof error.message === "string" ? error.message : "";
-          })
-          .join("\n")
-      : result.stdout,
-  ].join("\n");
+  // 通常の応答本文中に書かれたエラー例を、CLI の診断と取り違えない。
+  const events = agent === "agy" ? jsonEvents(result.stdout) : [];
+  const structured = agent === "codex" ? errors : events;
+  const trusted = [result.stderr, ...structured.map((e) => errorMessage(e))].join("\n");
+  const stdout = agent === "codex" || events.length > 0 ? "" : result.stdout;
+  // 機械的なコードはログの接頭辞があっても拾う。通常の stdout 本文には適用しない。
+  if (
+    /\b(?:rate_limit_exceeded|usage_limit_reached|insufficient_quota|resource_?exhausted|context_length_exceeded|context_window_exceeded)\b/i.test(
+      trusted,
+    )
+  )
+    return "unavailable";
+  const diagnostics = `${trusted}\n${stdout}`
+    .split("\n")
+    .map((line) => line.trim().replace(/^(?:(?:Error|API Error):\s*)+/i, ""));
   const unavailable = [
-    /\b(?:rate_limit_exceeded|usage_limit_reached|insufficient_quota|resource_exhausted|context_length_exceeded|context_window_exceeded)\b/i,
-    /(?:hit|reached|exceeded) (?:your |the )?(?:usage|rate|token|request) limit|(?:quota|usage limit|rate limit) (?:exceeded|exhausted|reached)|too many requests/i,
-    /(?:oauth|access|auth(?:entication)?) (?:token )?(?:has )?(?:expired|invalid)|(?:token|session|conversation) (?:has )?expired|(?:session|conversation)(?: [\w-]+)? (?:not found|does not exist)|no (?:session|conversation|rollout) found/i,
-    /(?:context window|context length|maximum context length).*(?:exceed|limit|full)|prompt is too long/i,
-    /please (?:run .*login|log in|login|sign in)|not (?:logged|signed) in/i,
+    /^(?:rate_limit_exceeded|usage_limit_reached|insufficient_quota|resource_exhausted|context_length_exceeded|context_window_exceeded)\b/i,
+    /^(?:you(?:['’]ve| have)?\s+)?(?:hit|reached|exceeded) (?:your |the )?(?:(?:usage|session|weekly|monthly|daily|5-hour|spend|rate|token|request|credit) ){1,3}(?:limit|budget|cap)\b/i,
+    /^(?:claude(?: ai)? )?(?:quota|(?:usage|rate|token|request|session|weekly|5-hour|context|spend)(?: usage)? limit) (?:exceeded|exhausted|reached)\b/i,
+    /^[A-Z][\w-]* limit reached\b.*resets\b/,
+    /^(?:too many requests|your credit balance is too low|your workspace is out of credits)\b/i,
+    /^(?:your )?(?:oauth|access|auth(?:entication)?) (?:token )?(?:has )?(?:expired|invalid)\b/i,
+    /^(?:your )?(?:access|refresh) token could not be refreshed\b/i,
+    /^(?:your )?(?:token|session|conversation) (?:has )?expired\b/i,
+    /^(?:session|conversation)(?: [\w-]+)? (?:not found|does not exist)\b|^no (?:session|conversation|rollout) found\b/i,
+    /^(?:context window|context length|maximum context length).*(?:exceed|limit|full)|^codex ran out of room in the model['’]s context window\b|^prompt is too long\b/i,
+    /^invalid api key\b|^please (?:run .*login|log in|login|(?:log out and )?sign in)|^not (?:logged|signed) in\b/i,
   ];
-  return unavailable.some((pattern) => pattern.test(diagnostic)) ? "unavailable" : "error";
+  // HTTP ステータス単独では、通常の本文「429 を返す」などと区別できない。
+  if (
+    /^(?:API Error:\s*)?(?:401|429)\b/im.test(trusted) ||
+    /\b(?:last status:\s*429|429 Too Many Requests)\b/i.test(trusted) ||
+    /^(?:Error:\s*)?API Error:\s*(?:401|429)\b/im.test(stdout)
+  )
+    return "unavailable";
+  return diagnostics.some((line) => unavailable.some((pattern) => pattern.test(line)))
+    ? "unavailable"
+    : "error";
+}
+
+/** 構造化出力のエラーだけを読む。response / item の本文は診断に使わない。 */
+function errorMessage(event: Record<string, unknown>): string {
+  if (typeof event.error === "string") return event.error;
+  const error = isRecord(event.error) ? event.error : event;
+  return typeof error.message === "string" ? error.message : "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

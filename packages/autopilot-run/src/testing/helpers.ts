@@ -44,6 +44,48 @@ export const GH_NO_PR = 'no pull requests found for branch "bot-wa-wa/fix-resume
 export const GH_NO_AUTH = `To get started with GitHub CLI, please run:  gh auth login
 Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.`;
 
+/** Claude Code 2.1.322 のバイナリで確認した上限・認証エラーの文言。
+ * 実在のモデル名は置かず、表示名だけ MODEL に置き換える。
+ */
+export const CLAUDE_UNAVAILABLE_MESSAGES = [
+  "You've hit your session limit · resets 3pm",
+  "You've hit your weekly limit",
+  "You've hit your 5-hour limit",
+  "MODEL limit reached · resets 5pm",
+  "you have reached your weekly usage limit",
+  "You've hit your monthly spend limit",
+  "Your credit balance is too low to access the Anthropic API",
+  "Context limit reached",
+  "Invalid API key · Please run /login",
+];
+
+/** codex-cli 0.167.1 のバイナリで確認した文言。上限の実発生時の記録ではない。 */
+export const CODEX_UNAVAILABLE_MESSAGES = [
+  "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.",
+  "Your access token could not be refreshed. Please log out and sign in again.",
+  "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+  "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+  "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+];
+
+/** 親が先頭 1 バイトを処理したことをログで確認してから、UTF-8 文字の残りを出す子。 */
+export function splitUtf8Script(stdoutPath: string, logPath: string, text: string): string {
+  return `
+    const { existsSync, statSync } = require("node:fs");
+    const paths = ${JSON.stringify([stdoutPath, logPath])};
+    const bytes = Buffer.from(${JSON.stringify(text)});
+    process.stdout.write(bytes.subarray(0, 1));
+    process.stderr.write(bytes.subarray(0, 1));
+    const deadline = Date.now() + 3000;
+    while (!paths.every((p) => existsSync(p) && statSync(p).size > 0)) {
+      if (Date.now() > deadline) process.exit(2);
+      await Bun.sleep(5);
+    }
+    process.stdout.write(bytes.subarray(1));
+    process.stderr.write(bytes.subarray(1));
+  `;
+}
+
 // ---------------------------------------------------------------------------
 // pipeline の単体テスト用
 

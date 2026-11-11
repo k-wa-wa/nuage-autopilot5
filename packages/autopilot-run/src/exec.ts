@@ -47,20 +47,24 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
       detached: true,
     });
     if (child.pid) active.add(child.pid);
-    let stdout = "";
-    let stderr = "";
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
     // 窓口が進捗を読めるよう、溜めずに逐次書き出す。
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk;
+      stdout.push(chunk);
       appendFileSync(opts.stdoutPath ?? opts.logPath, chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk;
+      stderr.push(chunk);
       appendFileSync(opts.logPath, chunk);
     });
     const done = (code: number) => {
       if (child.pid) active.delete(child.pid);
-      resolve({ code, stdout, stderr });
+      resolve({
+        code,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      });
     };
     child.on("error", (e) => {
       appendFileSync(opts.logPath, `${cmd}: ${e.message}\n`);

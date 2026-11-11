@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { buildArgv } from "./agents.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { buildArgv, classifyFailure } from "./agents.ts";
 import { judgeCi } from "./ci.ts";
+import { run } from "./exec.ts";
 import { parseChecks, parsePrNumber } from "./github.ts";
 import { parseStartOptions } from "./main.ts";
 import { reviewFileName, runPipeline } from "./pipeline.ts";
@@ -8,11 +11,15 @@ import * as prompts from "./prompts.ts";
 import { VERDICT } from "./prompts.ts";
 import {
   assignee,
+  CLAUDE_UNAVAILABLE_MESSAGES,
+  CODEX_UNAVAILABLE_MESSAGES,
   checks,
   GH_NO_AUTH,
   GH_NO_PR,
   pipelineConfig,
   pipelineHarness,
+  splitUtf8Script,
+  tempDir,
 } from "./testing/helpers.ts";
 
 /**
@@ -29,6 +36,121 @@ describe("agy が --model をプロンプトとして読んだ", () => {
         "-p",
         "PROMPT",
       ]);
+    }
+  });
+});
+
+describe("Claude CLI レビューで実物の利用不能メッセージを判定できなかった", () => {
+  test("Claude のセッション・週間・支出・コンテキスト上限を切り替え対象にする", () => {
+    for (const stdout of CLAUDE_UNAVAILABLE_MESSAGES) {
+      expect(classifyFailure("claude", { code: 1, stdout, stderr: "" })).toBe("unavailable");
+    }
+  });
+
+  test("Codex のコンテキスト上限・トークン再発行失敗・支出上限を認識する", () => {
+    for (const message of CODEX_UNAVAILABLE_MESSAGES) {
+      const stdout = JSON.stringify({ type: "turn.failed", error: { message } });
+      expect(classifyFailure("codex", { code: 1, stdout, stderr: "" })).toBe("unavailable");
+    }
+  });
+
+  test("通常の応答内のエラー例・ネスト上限では別 CLI に切り替えない", () => {
+    for (const agent of ["agy", "claude"] as const) {
+      for (const stdout of [
+        "レートリミット実装: 429 Too Many Requests を返す",
+        '設定例: "context_length_exceeded" を扱う',
+        "Subagent nesting limit reached",
+        "429 を返すようにした",
+        "exceeded retry limit, last status: 500 Internal Server Error",
+        "Reached the step limit for this task",
+        "hit the recursion limit",
+      ]) {
+        expect(classifyFailure(agent, { code: 1, stdout, stderr: "connect ECONNRESET" })).toBe(
+          "error",
+        );
+      }
+      // agy の構造化出力でも、正常な本文は診断に使わない。
+      expect(
+        classifyFailure(agent, {
+          code: 1,
+          stdout: JSON.stringify({ status: "SUCCESS", response: "Rate limit exceeded" }),
+          stderr: "connect ECONNRESET",
+        }),
+      ).toBe("error");
+    }
+    expect(
+      classifyFailure("codex", {
+        code: 1,
+        stderr: "",
+        stdout: JSON.stringify({
+          type: "turn.failed",
+          error: { message: "exceeded retry limit, last status: 500 Internal Server Error" },
+        }),
+      }),
+    ).toBe("error");
+  });
+
+  test("stderr の接頭辞付き機械コードと API エラーを認識する", () => {
+    for (const stderr of [
+      "E1112 04:00:00.000 client.go:12] RESOURCE_EXHAUSTED: Quota exceeded for model",
+      "Error 429: RESOURCE_EXHAUSTED",
+      "rpc error: code = ResourceExhausted desc = quota exceeded",
+    ])
+      expect(classifyFailure("agy", { code: 1, stdout: "", stderr })).toBe("unavailable");
+    for (const stdout of ["API Error: 429 Too Many Requests", "API Error: 401 Unauthorized"]) {
+      expect(classifyFailure("claude", { code: 1, stdout, stderr: "" })).toBe("unavailable");
+    }
+    expect(
+      classifyFailure("claude", {
+        code: 1,
+        stdout: "API Error: 500 Internal Server Error",
+        stderr: "",
+      }),
+    ).toBe("error");
+  });
+
+  test("Codex のリトライ終了でも、429 は上限、500 は通信障害として区別する", () => {
+    for (const [status, expected] of [
+      ["429 Too Many Requests", "unavailable"],
+      ["500 Internal Server Error", "error"],
+    ] as const) {
+      const stdout = JSON.stringify({
+        type: "turn.failed",
+        error: {
+          message: `exceeded retry limit, last status: ${status}`,
+        },
+      });
+      expect(classifyFailure("codex", { code: 1, stdout, stderr: "" })).toBe(expected);
+    }
+    expect(
+      classifyFailure("agy", {
+        code: 1,
+        stdout: "exceeded retry limit, last status: 429 Too Many Requests",
+        stderr: "connect ECONNRESET",
+      }),
+    ).toBe("error");
+  });
+});
+
+describe("レビュー本文の UTF-8 が stdout / stderr のチャンクの境目で壊れた", () => {
+  test("多バイト文字の途中で分かれた出力を文字化けさせずに返す", async () => {
+    const dir = tempDir();
+    try {
+      const out = join(dir.path, "out.log");
+      const log = join(dir.path, "run.log");
+      const text = "判定: must なし\n確かめたこと: 日本語 🌧️\n";
+      const result = await run([process.execPath, "-e", splitUtf8Script(out, log, text)], {
+        cwd: dir.path,
+        stdoutPath: out,
+        logPath: log,
+      });
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe(text);
+      expect(result.stderr).toBe(text);
+      expect(readFileSync(out, "utf8")).toBe(text);
+      expect(readFileSync(log, "utf8")).toBe(text);
+    } finally {
+      dir.cleanup();
     }
   });
 });
