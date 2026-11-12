@@ -87,12 +87,18 @@ ${COMMON_REVIEW_RULES}`;
 /**
  * レビュー・ゲートの出力から、最初に現れる「判定:」で始まる行を返す。
  * Markdown の装飾と空白を除いて比べる。前置きの行があっても判定を読めるようにする。
+ * 引用（> で始まる行）は前回の結果などの引き写しかもしれないので、引用でない判定の行を先に読む。
+ * 引用の判定しか無いときだけ、それを読む。
  */
 function verdictLine(text: string): string | undefined {
-  return text
+  const verdicts = text
     .split("\n")
-    .map((l) => l.replace(/[*#`>_\s]/g, ""))
-    .find((l) => l.startsWith("判定:"));
+    .map((l) => ({
+      quoted: l.trimStart().startsWith(">"),
+      line: l.replace(/[*#`>_\s]/g, ""),
+    }))
+    .filter((v) => v.line.startsWith("判定:"));
+  return (verdicts.find((v) => !v.quoted) ?? verdicts[0])?.line;
 }
 
 /**
@@ -147,6 +153,7 @@ ${prInfo}
 基点のコミットは ${input.baseSha} である。変更内容は \`git diff ${input.baseSha}...HEAD\` で確認できる。
 
 ゲートの手順書の「守ること」（読み取り専用など）を最優先にする。
+手順の実行で生じたファイル（テストの出力・ビルド成果物・ログなど）は終える前に片付け、作業ツリーを実行前の状態に戻す。未 commit のファイルが残っていると、autopilot は人間に返す。
 外部システムの一時的なエラー・環境が立ち上がらない等で確かめられなかったときは、不合格ではなく判定不能と書く。
 
 1 行目は次のどれか 1 つだけを書く:

@@ -540,7 +540,7 @@ describe("修正担当が commit せずに変更を残すと、未 commit の作
     };
     expect(await runPipeline({ ...cfg, from: "gate" }, h.deps)).toEqual({
       kind: "needs-human",
-      reason: "修正担当が変更を commit せずに残した",
+      reason: "修正担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
     });
     expect(h.calls.filter((c) => c.output?.startsWith("gate-"))).toHaveLength(1);
   });
@@ -593,5 +593,37 @@ describe("レビューの前置きの行のせいで、must なしの判定を m
   test("ゲートも前置きの後の「判定:」の行を読み、needs-human にしない", () => {
     const actual = `${preface}\n\n判定: 合格\n手順をすべて実行した。`;
     expect(prompts.parseGateVerdict(actual)).toBe("pass");
+  });
+});
+
+describe("修正担当が一部だけ commit して残りを作業ツリーに置くと、HEAD が変わったので素通りし、未 commit の変更込みでゲートに合格して done になりえた", () => {
+  test("HEAD が変わっても、修正担当の後に未 commit のファイルがあれば次の周へ進まず needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [true],
+      review: () => VERDICT.none,
+      gates: [{ name: "e2e" }],
+      gate: (round) => (round === 1 ? prompts.GATE_VERDICT.fail : prompts.GATE_VERDICT.pass),
+      dirtyOnSuccess: (_inv, kind) => kind === "fix",
+    });
+    const cfg = pipelineConfig(assignee("claude"), [assignee("agy")]);
+    expect(await runPipeline({ ...cfg, from: "gate" }, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "修正担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
+    });
+    expect(h.calls.map((c) => c.kind)).toEqual(["gate", "fix", "summarize"]);
+  });
+});
+
+describe("前置きで前回の判定を引用すると、引用した判定を読んで must を見落としうる", () => {
+  test("引用でない判定の行を先に読む", () => {
+    const actual = `前回の結果:\n> 判定: must なし\n\n判定: must あり\n- must: 直す`;
+    expect(prompts.reviewHasMust(actual)).toBe(true);
+    expect(
+      prompts.parseGateVerdict(`> ${prompts.GATE_VERDICT.pass}\n\n${prompts.GATE_VERDICT.fail}`),
+    ).toBe("fail");
+  });
+
+  test("引用の判定しか無ければ、それを読む", () => {
+    expect(prompts.reviewHasMust(`> ${VERDICT.none}`)).toBe(false);
   });
 });

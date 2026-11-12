@@ -176,6 +176,7 @@ export function pipelineHarness(opts: HarnessOptions) {
     },
     head: async () => `sha${head}`,
     fingerprint: async () => `sha${head}+${dirty}`,
+    uncommitted: async () => Array.from({ length: dirty }, (_, i) => `?? left-${i + 1}.txt`),
     findGates: async (baseSha) => {
       if (typeof opts.gates === "function") {
         return opts.gates(baseSha);

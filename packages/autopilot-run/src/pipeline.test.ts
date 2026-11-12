@@ -854,3 +854,131 @@ describe("runPipeline: --from gate", () => {
     expect(h.calls.map((c) => c.kind)).toEqual(["gate", "fix", "gate", "summarize"]);
   });
 });
+
+describe("runPipeline: 担当の後に作業ツリーが綺麗かを確かめる", () => {
+  const one = pipelineConfig(assignee("claude"), [assignee("agy")]);
+  const none = () => `${VERDICT.none}\n- nit: よい`;
+
+  test("実装担当が commit したうえでファイルを残したら、レビューへ進まず要約して needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [true],
+      github: { pr: 7 },
+      dirtyOnSuccess: (_inv, kind) => kind === "implement",
+    });
+    expect(await runPipeline(one, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "実装担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
+    });
+    expect(h.calls.map((c) => c.kind)).toEqual(["implement", "summarize"]);
+    expect(h.calls.at(-1)?.prompt).toContain("PR #7");
+  });
+
+  test("実装担当がファイルを残し PR も作らなかったときも、残ったファイルを理由にする", async () => {
+    const h = pipelineHarness({
+      commits: [true],
+      github: { pr: null },
+      dirtyOnSuccess: (_inv, kind) => kind === "implement",
+    });
+    const o = await runPipeline(one, h.deps);
+    expect(o).toEqual({
+      kind: "needs-human",
+      reason: "実装担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
+    });
+  });
+
+  test("1 周目の修正で HEAD が変わってもファイルが残っていれば、次の周へ進まず needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [true, true],
+      gates: [{ name: "e2e" }],
+      dirtyOnSuccess: (_inv, kind) => kind === "fix",
+    });
+    expect(await runPipeline(one, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "修正担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
+    });
+    expect(h.calls.map((c) => c.kind)).toEqual([
+      "implement",
+      "review",
+      "review",
+      "fix",
+      "summarize",
+    ]);
+  });
+
+  test("2 周目以降の修正の後も確かめる", async () => {
+    let fixes = 0;
+    const h = pipelineHarness({
+      commits: [true, true, true],
+      dirtyOnSuccess: (_inv, kind) => kind === "fix" && ++fixes === 2,
+    });
+    expect(await runPipeline(one, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "修正担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
+    });
+    expect(h.calls.filter((c) => c.kind === "fix")).toHaveLength(2);
+    expect(h.calls.at(-1)?.kind).toBe("summarize");
+  });
+
+  test("残ったファイルが多ければ先頭の 5 件と残りの件数を理由に書く", async () => {
+    const h = pipelineHarness({ commits: [true, false], review: none });
+    let fixed = false;
+    const run = h.deps.runAgent;
+    h.deps.runAgent = async (inv, prompt, opts) => {
+      const r = await run(inv, prompt, opts);
+      if (h.calls.at(-1)?.kind === "fix") fixed = true;
+      return r;
+    };
+    h.deps.uncommitted = async () =>
+      fixed ? Array.from({ length: 7 }, (_, i) => ` M src/f${i + 1}.ts`) : [];
+    expect(await runPipeline(one, h.deps)).toEqual({
+      kind: "needs-human",
+      reason:
+        "修正担当の実行後、作業ツリーに未 commit のファイルが残っている: M src/f1.ts, M src/f2.ts, M src/f3.ts, M src/f4.ts, M src/f5.ts ほか 2 件",
+    });
+  });
+
+  test("needs-human.md とファイルの残りが重なったら、両方を理由に書く", async () => {
+    const h = pipelineHarness({
+      commits: [true, true],
+      dirtyOnSuccess: (_inv, kind) => kind === "fix",
+    });
+    const run = h.deps.runAgent;
+    h.deps.runAgent = async (inv, prompt, opts) => {
+      const r = await run(inv, prompt, opts);
+      if (h.calls.at(-1)?.kind === "fix") h.deps.state.write("needs-human.md", "認証が無い\n");
+      return r;
+    };
+    expect(await runPipeline(one, h.deps)).toEqual({
+      kind: "needs-human",
+      reason:
+        "認証が無い。修正担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
+    });
+  });
+
+  test("ゲートがファイルを残したら、修正担当のものと取り違えず、ゲートの後で needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      gates: [{ name: "e2e" }],
+      gate: () => `${GATE_VERDICT.fail}\n壊れている`,
+      dirtyOnSuccess: (_inv, kind) => kind === "gate",
+    });
+    expect(await runPipeline({ ...one, from: "gate" }, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "ゲートの実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
+    });
+    expect(h.calls.map((c) => c.kind)).toEqual(["gate", "summarize"]);
+  });
+
+  test("ゲートの不合格を直した直後に上限へ達したら、CI と全ゲートを確かめていないと伝える", async () => {
+    const h = pipelineHarness({
+      commits: [true],
+      github: { pr: 7 },
+      gates: [{ name: "e2e" }],
+      gate: () => `${GATE_VERDICT.fail}\n壊れている`,
+    });
+    expect(await runPipeline({ ...one, from: "gate", maxRounds: 1 }, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "修正ループが上限（1 回）に達した。最後の修正の CI と全ゲートを確かめていない",
+    });
+  });
+});

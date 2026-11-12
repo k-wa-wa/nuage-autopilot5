@@ -171,6 +171,19 @@ export async function worktreeFingerprint(cwd: string): Promise<string> {
   return hash.digest("hex");
 }
 
+/**
+ * 作業ツリーに残っている未 commit のファイル（`git status --porcelain=v1 --untracked-files=all` の各行）。
+ * .gitignore に当たるものと .autopilot/（exclude 済み）は含まない。
+ * git が失敗したら例外にする（読めないことを「綺麗」とみなさない）。
+ */
+export async function uncommittedFiles(cwd: string): Promise<string[]> {
+  const r = await capture(["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd, {
+    trim: false,
+  });
+  if (r.code !== 0) throw new Error(`git status が失敗した (exit ${r.code}): ${r.stderr}`);
+  return r.stdout.split("\n").filter((l) => l.trim().length > 0);
+}
+
 /** git の共通ディレクトリ（worktree でも本体の .git を指す）。 */
 export async function gitCommonDir(cwd: string): Promise<string> {
   return (await capture(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd))

@@ -10,6 +10,7 @@ import {
   parseFailedRunId,
   parsePrNumber,
   resolveBaseSha,
+  uncommittedFiles,
 } from "./github.ts";
 import { GH_NO_AUTH, GH_NO_PR, git, tempRepo } from "./testing/helpers.ts";
 
@@ -118,6 +119,30 @@ describe("git の読み取り", () => {
   test("既定ブランチが分からなくても origin/HEAD などで起点を探す", async () => {
     repo = tempRepo();
     expect(await resolveBaseSha(repo.work, null)).toBe(git(repo.work, "rev-parse", "HEAD"));
+  });
+
+  test("uncommittedFiles: 変更・未追跡のファイルを並べ、ignore に当たるものと .autopilot/ は含めない", async () => {
+    repo = tempRepo();
+    expect(await uncommittedFiles(repo.work)).toEqual([]);
+    writeFileSync(join(repo.work, ".gitignore"), "ignored/\n");
+    git(repo.work, "add", ".gitignore");
+    git(repo.work, "commit", "-qm", "ignore");
+    writeFileSync(join(repo.work, ".git", "info", "exclude"), ".autopilot/\n");
+    mkdirSync(join(repo.work, "ignored"));
+    writeFileSync(join(repo.work, "ignored", "x.log"), "x\n");
+    mkdirSync(join(repo.work, ".autopilot"));
+    writeFileSync(join(repo.work, ".autopilot", "needs-human.md"), "x\n");
+    expect(await uncommittedFiles(repo.work)).toEqual([]);
+    writeFileSync(join(repo.work, "README.md"), "changed\n");
+    mkdirSync(join(repo.work, "out", "deep"), { recursive: true });
+    writeFileSync(join(repo.work, "out", "deep", "new.txt"), "new\n");
+    // 先頭の空白（作業ツリーだけの変更）も保つ。
+    expect(await uncommittedFiles(repo.work)).toEqual([" M README.md", "?? out/deep/new.txt"]);
+  });
+
+  test("uncommittedFiles: git が失敗したら綺麗とみなさず例外にする", async () => {
+    repo = tempRepo();
+    await expect(uncommittedFiles(repo.root)).rejects.toThrow("git status が失敗した");
   });
 
   test("gateNameFromPath: ファイル名からゲート名を決める", () => {

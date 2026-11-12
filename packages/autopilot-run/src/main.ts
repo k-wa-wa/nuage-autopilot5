@@ -27,6 +27,7 @@ import {
   headSha,
   realGitHub,
   resolveBaseSha,
+  uncommittedFiles,
   worktreeFingerprint,
 } from "./github.ts";
 import {
@@ -322,6 +323,7 @@ async function start(
       },
       head: () => headSha(root),
       fingerprint: () => worktreeFingerprint(root),
+      uncommitted: () => uncommittedFiles(root),
       findGates: (baseSha) => findGateFiles(root, baseSha),
       github: opts.local ? null : realGitHub(root),
       clock: { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) },
