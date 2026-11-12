@@ -195,10 +195,14 @@ export interface GateFile {
 export function gateNameFromPath(path: string): string {
   const base = path.split("/").pop() ?? path;
   const stripped = base.replace(/^autopilot-gate[-_]?/, "").replace(/\.md$/, "");
-  return encodeURIComponent(stripped || "default").replace(
+  const encoded = encodeURIComponent(stripped || "default").replace(
     /[!'()*]/g,
     (c) => `%${c.charCodeAt(0).toString(16)}`,
   );
+  // 保存先の接頭辞・拡張子・衝突時の連番を含めても 255 バイト以内に収める。
+  if (encoded.length <= 160) return encoded;
+  const hash = createHash("sha256").update(path).digest("hex").slice(0, 16);
+  return `${encoded.slice(0, 140)}-${hash}`;
 }
 
 /**

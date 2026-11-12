@@ -3,9 +3,11 @@
  * 担当は窓口との会話を知らないので、必要な情報は .autopilot/ のファイルで渡す。
  */
 
-const RULES = `あなたは自律実行の担当である。人間は不在なので質問しない。
-迷ったら妥当な方を選び、判断と理由を .autopilot/decisions.md に追記する。
+const AUTONOMOUS_RULES = `人間は不在なので質問しない。
 禁止: PR のマージ、Issue・PR のクローズ、既定ブランチへの push、.autopilot/ のコミット、機密情報（APIキー・秘密鍵・未暗号化 SOPS 等）のコミットや Issue・PR への投稿。`;
+
+const RULES = `あなたは自律実行の担当である。${AUTONOMOUS_RULES}
+迷ったら妥当な方を選び、判断と理由を .autopilot/decisions.md に追記する。`;
 
 export type ShipMode = "pr" | "local";
 
@@ -133,6 +135,7 @@ export function gate(input: GateInput): string {
     : "PR 番号はない（--local で実行中）。Preview 環境が必要なゲートは「対象外」と判定する。";
 
   return `あなたはリポジトリのゲート検証担当である。ファイルは一切変更しない。
+${AUTONOMOUS_RULES}
 ゲートの手順書 ${input.sourcePath} を読み、書かれた手順を実際に実行して確かめる。
 これは基点から取り出した手順書である。作業ツリーの .agents/autopilot-gate*.md は読まない。
 ${prInfo}

@@ -585,7 +585,7 @@ describe("runPipeline: リポジトリごとのゲート実行", () => {
   const none = () => `${VERDICT.none}\n- nit: よい`;
 
   test("ゲートなし: ログに「ゲートなし」と残して完了する", async () => {
-    const h = pipelineHarness({ commits: [true, false], gates: [] });
+    const h = pipelineHarness({ commits: [true, false], review: none, gates: [] });
     expect(await runPipeline(gateCfg, h.deps)).toEqual({ kind: "done" });
     expect(h.logs).toContain("ゲートなし");
     expect(h.calls.filter((c) => c.kind === "gate")).toHaveLength(0);
@@ -594,6 +594,7 @@ describe("runPipeline: リポジトリごとのゲート実行", () => {
   test("全合格で done: ゲートを実行し合格なら完了し、担当と判定が記録される", async () => {
     const h = pipelineHarness({
       commits: [true, false],
+      review: none,
       gates: [{ name: "e2e" }],
       gate: () => `${GATE_VERDICT.pass}\nE2E すべて成功`,
     });
@@ -606,9 +607,20 @@ describe("runPipeline: リポジトリごとのゲート実行", () => {
     expect(h.logs.some((l) => l.includes("ゲート (e2e): pass 担当: agy"))).toBe(true);
   });
 
+  test("must を見送って HEAD が変わらない場合もゲートを実行する", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      review: () => VERDICT.must,
+      gates: [{ name: "e2e" }],
+    });
+    expect(await runPipeline(gateCfg, h.deps)).toEqual({ kind: "done" });
+    expect(h.calls.filter((c) => c.kind === "gate")).toHaveLength(1);
+  });
+
   test("対象外は合格扱い: 判定が「対象外」なら合格扱いで done になる", async () => {
     const h = pipelineHarness({
       commits: [true, false],
+      review: none,
       gates: [{ name: "preview" }],
       gate: () => `${GATE_VERDICT.skip}\n--local のため Preview なし`,
     });
@@ -653,6 +665,7 @@ describe("runPipeline: リポジトリごとのゲート実行", () => {
   test("判定不能で needs-human: 修正ループに入らず即座に終了する", async () => {
     const h = pipelineHarness({
       commits: [true, false],
+      review: none,
       gates: [{ name: "e2e" }],
       gate: () => `${GATE_VERDICT.inconclusive}\n外部システム 503 エラー`,
     });
@@ -667,6 +680,7 @@ describe("runPipeline: リポジトリごとのゲート実行", () => {
   test("判定不能と不合格が混ざったら needs-human を優先する", async () => {
     const h = pipelineHarness({
       commits: [true, false],
+      review: none,
       gates: [{ name: "fail-gate" }, { name: "inconclusive-gate" }],
       gate: (_, name) =>
         name === "fail-gate"
@@ -682,6 +696,7 @@ describe("runPipeline: リポジトリごとのゲート実行", () => {
   test("読めない判定で needs-human", async () => {
     const h = pipelineHarness({
       commits: [true, false],
+      review: none,
       gates: [{ name: "e2e" }],
       gate: () => "何らかの出力（判定ヘッダなし）",
     });
@@ -694,6 +709,7 @@ describe("runPipeline: リポジトリごとのゲート実行", () => {
   test("ゲート担当が全候補で失敗したら needs-human", async () => {
     const h = pipelineHarness({
       commits: [true, false],
+      review: none,
       gates: [{ name: "e2e" }],
       failAgent: (_, kind) => kind === "gate",
     });

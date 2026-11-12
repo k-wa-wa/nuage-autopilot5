@@ -285,7 +285,7 @@ async function rounds(
     const must = (reviews ?? []).some((name) => prompts.reviewHasMust(d.state.read(name) ?? ""));
 
     const inboxName = d.state.takeInbox(round);
-    const inbox = inboxName ? d.state.rel(inboxName) : null;
+    let inbox = inboxName ? d.state.rel(inboxName) : null;
 
     let gateLogs: string[] = pendingGateFailures ?? [];
     pendingGateFailures = null;
@@ -298,13 +298,14 @@ async function rounds(
       }
       if (reviews === null || round > 1) {
         const gateOutcome = await runGates(cfg, d, runner, round, pr);
-        if (gateOutcome.kind === "pass" || gateOutcome.kind === "none") {
-          return { kind: "done" };
-        }
         if (gateOutcome.kind === "needs-human") {
           return { kind: "needs-human", reason: gateOutcome.reason };
         }
-        gateLogs = gateOutcome.failures;
+        // ゲートの待ち時間に届いた指示も、この周の修正へ渡す。
+        const duringGate = d.state.takeInbox(round);
+        inbox = duringGate ? d.state.rel(duringGate) : null;
+        if (gateOutcome.kind === "fail") gateLogs = gateOutcome.failures;
+        else if (inbox === null) return { kind: "done" };
       }
     }
 
@@ -336,19 +337,18 @@ async function rounds(
       if (gateLogs.length > 0)
         return { kind: "needs-human", reason: "ゲートの不合格を直せなかった" };
       const gateOutcome = await runGates(cfg, d, runner, round, pr);
-      if (gateOutcome.kind === "pass" || gateOutcome.kind === "none") {
-        return { kind: "done" };
-      }
       if (gateOutcome.kind === "needs-human") {
         return { kind: "needs-human", reason: gateOutcome.reason };
       }
-      pendingGateFailures = gateOutcome.failures;
+      if (gateOutcome.kind === "fail") pendingGateFailures = gateOutcome.failures;
+      else if (!d.state.read("inbox.md")) return { kind: "done" };
+      // この周の修正は済んでいる。新しい指示は退避せず次の周に渡す。
       needsReview = false;
       continue;
     }
 
-    // 不合格を直した後は、レビューし直さず、CI と全ゲートを確かめ直す
-    needsReview = (must || inbox !== null) && gateLogs.length === 0;
+    // ゲートだけの修正は再レビューしない。追加指示による変更はレビューする。
+    needsReview = inbox !== null || (must && gateLogs.length === 0);
     if (!needsReview) {
       d.state.log(
         gateLogs.length > 0
@@ -357,9 +357,16 @@ async function rounds(
       );
     }
   }
+  const remaining = [
+    pendingGateFailures && "ゲートの不合格が未修正で残っている",
+    d.state.read("inbox.md") && "人間の追加指示が未処理で残っている",
+  ].filter(Boolean);
+  if (remaining.length === 0) {
+    remaining.push(needsReview ? "最後の修正は未レビュー" : "最後の修正の CI を確かめていない");
+  }
   return {
     kind: "needs-human",
-    reason: `修正ループが上限（${cfg.maxRounds} 回）に達した。${needsReview ? "最後の修正は未レビュー" : "最後の修正の CI を確かめていない"}`,
+    reason: `修正ループが上限（${cfg.maxRounds} 回）に達した。${remaining.join("。")}`,
   };
 }
 

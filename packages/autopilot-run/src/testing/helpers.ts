@@ -135,11 +135,10 @@ export function pipelineHarness(opts: HarnessOptions) {
   const stages: string[] = [];
   const logs: string[] = [];
   const savedLogs: string[] = [];
-  const inbox = opts.inbox ?? false;
-  let inboxTaken = false;
   const commits = [...opts.commits];
   const snapshots = [...(opts.github?.snapshots ?? [])];
   const storedFiles = new Map<string, string>();
+  if (opts.inbox) storedFiles.set("inbox.md", "追加指示");
 
   const github: GitHub | null = opts.github
     ? {
@@ -230,9 +229,12 @@ export function pipelineHarness(opts: HarnessOptions) {
         storedFiles.set(n, cur + text);
       },
       takeInbox: (round) => {
-        if (!inbox || inboxTaken) return null;
-        inboxTaken = true;
-        return `inbox-${round}.md`;
+        const text = storedFiles.get("inbox.md");
+        if (!text) return null;
+        const name = `inbox-${round}.md`;
+        storedFiles.set(name, text);
+        storedFiles.delete("inbox.md");
+        return name;
       },
     },
   };

@@ -56,6 +56,12 @@ describe("禁止事項はすべての自律ターンに届く", () => {
     implement: prompts.implement("pr"),
     fix: prompts.fix({ mode: "pr", scope: "must-should", reviews: [], ciLog: null, inbox: null }),
     summarize: prompts.summarize("abc", 7),
+    gate: prompts.gate({
+      name: "default",
+      sourcePath: ".autopilot/gate-src-default.md",
+      baseSha: "abc",
+      pr: 7,
+    }),
   };
 
   for (const [kind, p] of Object.entries(autonomous)) {
@@ -85,6 +91,7 @@ describe("禁止事項はすべての自律ターンに届く", () => {
       pr: 1,
     });
     expect(p).toContain("ファイルは一切変更しない");
+    expect(p).not.toContain(".autopilot/decisions.md に追記する");
   });
 
   test("失敗は修正担当が隠さず、人間に返せる約束がある", () => {
