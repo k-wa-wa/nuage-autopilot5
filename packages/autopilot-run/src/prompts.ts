@@ -84,15 +84,23 @@ ${COMMON_REVIEW_RULES}`;
 ${COMMON_REVIEW_RULES}`;
 }
 
-/** レビューに must があるか。1 行目の判定だけを読む。
+/**
+ * レビュー・ゲートの出力から、最初に現れる「判定:」で始まる行を返す。
+ * Markdown の装飾と空白を除いて比べる。前置きの行があっても判定を読めるようにする。
+ */
+function verdictLine(text: string): string | undefined {
+  return text
+    .split("\n")
+    .map((l) => l.replace(/[*#`>_\s]/g, ""))
+    .find((l) => l.startsWith("判定:"));
+}
+
+/**
+ * レビューに must があるか。最初の「判定:」の行を読む。
  * 判定が読めなければ、見落としより再レビューの方が安いので must ありとみなす。
  */
 export function reviewHasMust(text: string): boolean {
-  const first = text
-    .split("\n")
-    .map((l) => l.replace(/[*#`>_\s]/g, ""))
-    .find((l) => l !== "");
-  return first !== VERDICT.none.replace(/\s/g, "");
+  return verdictLine(text) !== VERDICT.none.replace(/\s/g, "");
 }
 
 /** ゲートの 1 行目。pipeline はこれを読んで合否・対象外・判定不能を決める。 */
@@ -106,19 +114,16 @@ export const GATE_VERDICT = {
 export type GateVerdict = "pass" | "fail" | "skip" | "inconclusive" | "unknown";
 
 /**
- * ゲートの 1 行目を読む。
+ * ゲートの判定を読む。最初の「判定:」の行を読む。
  * 判定が読めなければ unknown を返す。
  */
 export function parseGateVerdict(text: string): GateVerdict {
-  const first = text
-    .split("\n")
-    .map((l) => l.replace(/[*#`>_\s]/g, ""))
-    .find((l) => l !== "");
-  if (!first) return "unknown";
-  if (first === GATE_VERDICT.pass.replace(/\s/g, "")) return "pass";
-  if (first === GATE_VERDICT.fail.replace(/\s/g, "")) return "fail";
-  if (first === GATE_VERDICT.skip.replace(/\s/g, "")) return "skip";
-  if (first === GATE_VERDICT.inconclusive.replace(/\s/g, "")) return "inconclusive";
+  const line = verdictLine(text);
+  if (!line) return "unknown";
+  if (line === GATE_VERDICT.pass.replace(/\s/g, "")) return "pass";
+  if (line === GATE_VERDICT.fail.replace(/\s/g, "")) return "fail";
+  if (line === GATE_VERDICT.skip.replace(/\s/g, "")) return "skip";
+  if (line === GATE_VERDICT.inconclusive.replace(/\s/g, "")) return "inconclusive";
   return "unknown";
 }
 

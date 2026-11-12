@@ -105,6 +105,8 @@ export interface HarnessOptions {
   failAgent?: (inv: Invocation, kind: PromptKind) => boolean;
   /** 失敗する前に作業ツリーを書き換えるか（途中まで書いて落ちた担当）。 */
   dirtyOnFail?: (inv: Invocation, kind: PromptKind) => boolean;
+  /** 成功しても commit せずに作業ツリーを書き換えたままにするか。 */
+  dirtyOnSuccess?: (inv: Invocation, kind: PromptKind) => boolean;
   /** レビューの本文。省略時は must あり（指摘を直せば再レビューする、今までどおりの流れ）。 */
   review?: (round: number, reviewer: string) => string;
   /** ゲートの手順書一覧。省略時は空（ゲートなし）。 */
@@ -164,6 +166,7 @@ export function pipelineHarness(opts: HarnessOptions) {
         return { ok: false, session: null, failure: opts.failure ?? "unavailable" };
       }
       if ((kind === "implement" || kind === "fix") && commits.shift()) head++;
+      if (opts.dirtyOnSuccess?.(inv, kind)) dirty++;
       const id = !session
         ? null
         : session.kind === "resume"

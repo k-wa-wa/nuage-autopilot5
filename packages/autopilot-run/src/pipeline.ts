@@ -233,6 +233,8 @@ async function rounds(
   let reviewedAt: string | null = null;
   /** 直前の周で直せなかったゲート不合格。次の周の修正担当へ渡す。 */
   let pendingGateFailures: string[] | null = null;
+  /** 全ゲートが合格（または対象外・ゲートなし）した HEAD。同じ HEAD でゲートを走らせ直さない。 */
+  let gatesPassedAt: string | null = null;
 
   for (let round = 1; round <= cfg.maxRounds; round++) {
     const head = await d.head();
@@ -305,11 +307,15 @@ async function rounds(
         const duringGate = d.state.takeInbox(round);
         inbox = duringGate ? d.state.rel(duringGate) : null;
         if (gateOutcome.kind === "fail") gateLogs = gateOutcome.failures;
-        else if (inbox === null) return { kind: "done" };
+        else {
+          gatesPassedAt = head;
+          if (inbox === null) return { kind: "done" };
+        }
       }
     }
 
     d.state.stage(`fixing (round ${round})`);
+    const beforeFix = await d.fingerprint();
     const prompt = prompts.fix({
       mode,
       scope: round === 1 ? "must-should" : "must",
@@ -333,15 +339,24 @@ async function rounds(
     }
 
     if ((await d.head()) === head) {
+      // commit されていない変更をゲートで確かめて done にしない。
+      if ((await d.fingerprint()) !== beforeFix) {
+        return { kind: "needs-human", reason: "修正担当が変更を commit せずに残した" };
+      }
       if (ciLog) return { kind: "needs-human", reason: "CI の失敗を直せなかった" };
       if (gateLogs.length > 0)
         return { kind: "needs-human", reason: "ゲートの不合格を直せなかった" };
-      const gateOutcome = await runGates(cfg, d, runner, round, pr);
-      if (gateOutcome.kind === "needs-human") {
-        return { kind: "needs-human", reason: gateOutcome.reason };
+      if (gatesPassedAt === head) {
+        d.state.log("この HEAD はゲートに合格済みなので、ゲートを走らせ直さない");
+      } else {
+        const gateOutcome = await runGates(cfg, d, runner, round, pr);
+        if (gateOutcome.kind === "needs-human") {
+          return { kind: "needs-human", reason: gateOutcome.reason };
+        }
+        if (gateOutcome.kind === "fail") pendingGateFailures = gateOutcome.failures;
+        else gatesPassedAt = head;
       }
-      if (gateOutcome.kind === "fail") pendingGateFailures = gateOutcome.failures;
-      else if (!d.state.read("inbox.md")) return { kind: "done" };
+      if (pendingGateFailures === null && !d.state.read("inbox.md")) return { kind: "done" };
       // この周の修正は済んでいる。新しい指示は退避せず次の周に渡す。
       needsReview = false;
       continue;
