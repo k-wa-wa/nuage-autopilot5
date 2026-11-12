@@ -221,7 +221,7 @@ export function pipelineConfig(
     const r = reviewers[i % reviewers.length]!;
     return {
       ...r,
-      perspective: r.perspective ?? p.slug,
+      perspective: p.slug,
     };
   });
   return {

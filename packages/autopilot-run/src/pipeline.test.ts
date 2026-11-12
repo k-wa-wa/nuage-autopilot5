@@ -109,6 +109,13 @@ describe("runPipeline: 基本の流れ", () => {
     expect(h.deps.state.read("review-1-coverage.md")).toContain("\n担当: codex\n");
   });
 
+  test("レビューが成功したら、run.log に観点ごとの担当を残す", async () => {
+    const h = pipelineHarness({ commits: [true, false] });
+    await runPipeline(cfg, h.deps);
+    expect(h.logs).toContain("レビュー (free): agy");
+    expect(h.logs).toContain("レビュー (coverage): codex");
+  });
+
   test("人間の追加指示は修正のプロンプトに渡す", async () => {
     const h = pipelineHarness({ commits: [true, false], inbox: true });
     await runPipeline(cfg, h.deps);
@@ -419,7 +426,7 @@ describe("runPipeline: レビュー担当の失敗", () => {
     expect(fix.prompt).not.toContain("review-1-free.md");
     expect(fix.prompt).toContain("review-1-coverage.md");
     const summarize = h.calls.find((c) => c.kind === "summarize")!;
-    expect(summarize.prompt).toContain("全候補が失敗してレビューが欠けた観点: free");
+    expect(summarize.prompt).toContain("全候補が失敗してレビューが欠けた観点: free (round 1)");
   });
 
   test("片方が利用上限なら別の担当が両方の観点を見る", async () => {
@@ -569,14 +576,6 @@ describe("reviewFileName", () => {
     const b = reviewFileName("coverage", 1);
     expect(a).toBe("review-1-free.md");
     expect(b).toBe("review-1-coverage.md");
-    expect(a).not.toBe(b);
-  });
-
-  test("Assignee を渡しても観点でファイル名が決まる", () => {
-    const a = reviewFileName({ name: "agy", chain: [], perspective: "free" }, 2);
-    const b = reviewFileName({ name: "agy", chain: [], perspective: "coverage" }, 2);
-    expect(a).toBe("review-2-free.md");
-    expect(b).toBe("review-2-coverage.md");
     expect(a).not.toBe(b);
   });
 });

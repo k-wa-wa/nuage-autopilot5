@@ -51,15 +51,7 @@ const COMMON_REVIEW_RULES = `重要度は次のとおり付ける。軽微な懸
 2 行目以降に、指摘を重要度付きの箇条書きで書く（「${VERDICT.none}」は must が 0 件という意味であり、should や nit があれば「指摘なし」とせず続けてすべて書く）。
 指摘の有無にかかわらず、最後に「確かめたこと:」として、各観点・仕様の各項目・テスト・影響範囲のどれをどう確かめたかを 2〜3 行で書く。`;
 
-export function review(
-  perspectiveOrInput: ReviewPerspectiveSlug | ReviewInput,
-  maybeInput?: ReviewInput,
-): string {
-  const perspective: ReviewPerspectiveSlug =
-    typeof perspectiveOrInput === "string" ? perspectiveOrInput : "coverage";
-  const input: ReviewInput =
-    typeof perspectiveOrInput === "string" ? maybeInput! : perspectiveOrInput;
-
+export function review(perspective: ReviewPerspectiveSlug, input: ReviewInput): string {
   const since = input.since
     ? `\n前回のレビューの後の修正は \`git diff ${input.since}..HEAD\` である。ここを中心に、直っていないものと、修正で新たに壊れたものを見る。`
     : "";

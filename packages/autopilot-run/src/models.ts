@@ -124,7 +124,6 @@ export function resolveChain(spec: AgentSpec, level: Level, table: ModelTable): 
 export interface Assignee {
   name: string;
   chain: Invocation[];
-  perspective?: ReviewPerspectiveSlug;
 }
 
 export interface ReviewerAssignee extends Assignee {

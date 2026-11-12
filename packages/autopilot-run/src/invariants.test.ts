@@ -70,7 +70,11 @@ describe("禁止事項はすべての自律ターンに届く", () => {
   }
 
   test("レビュー担当には何も書かせない", () => {
-    expect(prompts.review({ baseSha: "abc", since: null })).toContain("ファイルは一切変更しない");
+    for (const p of prompts.REVIEW_PERSPECTIVES) {
+      expect(prompts.review(p.slug, { baseSha: "abc", since: null })).toContain(
+        "ファイルは一切変更しない",
+      );
+    }
   });
 });
 

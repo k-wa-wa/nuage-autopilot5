@@ -94,12 +94,8 @@ export function formatOutcome(o: Outcome): string {
 }
 
 /** レビュー結果のファイル名。エージェント名ではなく観点で付ける。 */
-export function reviewFileName(
-  target: prompts.ReviewPerspectiveSlug | Assignee,
-  round: number,
-): string {
-  const slug = typeof target === "string" ? target : (target.perspective ?? target.name);
-  return `review-${round}-${slug.replace(/[^A-Za-z0-9._-]+/g, "-")}.md`;
+export function reviewFileName(perspective: prompts.ReviewPerspectiveSlug, round: number): string {
+  return `review-${round}-${perspective}.md`;
 }
 
 /** 担当を、モデルの並びの前から順に試す。 */
@@ -252,7 +248,7 @@ async function rounds(
     const [ci, reviewRes] = await Promise.all([ciPromise, reviewPromise]);
 
     if (reviewRes) {
-      for (const m of reviewRes.missing) missingPerspectives.add(m);
+      for (const m of reviewRes.missing) missingPerspectives.add(`${m} (round ${round})`);
     }
     const reviews = reviewRes ? reviewRes.files : null;
 
@@ -330,21 +326,24 @@ async function review(
 ): Promise<ReviewOutcome> {
   const results = await Promise.all(
     cfg.reviewers.map(async (rv) => {
-      const perspective = rv.perspective ?? "coverage";
-      const name = reviewFileName(rv, round);
+      const name = reviewFileName(rv.perspective, round);
       // レビュー担当はファイルを書き換えないので、失敗したら常に次のモデルで試し直す。
-      const r = await runner.run(rv, prompts.review(perspective, { baseSha: cfg.baseSha, since }), {
-        writes: false,
-        output: name,
-      });
+      const r = await runner.run(
+        rv,
+        prompts.review(rv.perspective, { baseSha: cfg.baseSha, since }),
+        {
+          writes: false,
+          output: name,
+        },
+      );
       if (r.ok && r.invocation) {
         const invStr = formatInvocation(r.invocation);
         d.state.append(name, `\n担当: ${invStr}\n`);
-        d.state.log(`レビュー (${perspective}): ${invStr}`);
-        return { ok: true, name, perspective };
+        d.state.log(`レビュー (${rv.perspective}): ${invStr}`);
+        return { ok: true, name, perspective: rv.perspective };
       }
-      d.state.log(`レビュー失敗 (${perspective}): ${rv.name} の全候補が失敗した`);
-      return { ok: false, name, perspective };
+      d.state.log(`レビュー失敗 (${rv.perspective}): ${rv.name} の全候補が失敗した`);
+      return { ok: false, name, perspective: rv.perspective };
     }),
   );
   return {
