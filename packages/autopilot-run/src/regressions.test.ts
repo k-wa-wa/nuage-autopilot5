@@ -22,6 +22,27 @@ import {
   tempDir,
 } from "./testing/helpers.ts";
 
+describe("ゲート読み取りの失敗をゲートなしとして通り抜けさせない", () => {
+  test("手順書が読めなければ修正ループを回さず人間へ返し、要約する", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      gates: () => {
+        throw new Error("git show failed");
+      },
+    });
+    const outcome = await runPipeline(
+      pipelineConfig(assignee("claude"), [assignee("agy")], { from: "gate" }),
+      h.deps,
+    );
+    expect(outcome).toEqual({
+      kind: "needs-human",
+      reason: "ゲートの手順書を読めない: git show failed",
+    });
+    expect(h.logs).not.toContain("ゲートなし");
+    expect(h.calls.map((c) => c.kind)).toEqual(["summarize"]);
+  });
+});
+
 /**
  * 実際に踏んだ欠陥の回帰テスト。
  * どれも「型では防げず、動かして初めて分かる」種類のものだった。

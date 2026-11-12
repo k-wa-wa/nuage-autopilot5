@@ -181,3 +181,48 @@ export async function gitToplevel(cwd: string): Promise<string | null> {
   const r = await capture(["git", "rev-parse", "--show-toplevel"], cwd);
   return r.code === 0 ? r.stdout : null;
 }
+
+export interface GateFile {
+  name: string;
+  path: string;
+  content: string;
+}
+
+/**
+ * ゲートのファイル名から名前を決める。
+ * autopilot-gate と .md を外し、空なら default。
+ */
+export function gateNameFromPath(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  const stripped = base.replace(/^autopilot-gate[-_]?/, "").replace(/\.md$/, "");
+  return encodeURIComponent(stripped || "default").replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16)}`,
+  );
+}
+
+/**
+ * 基点（baseSha）の木にある .agents/autopilot-gate*.md をすべて見つけ、中身を読む。
+ * PR が自分のゲートを緩めて通り抜けるのを防ぐため、基点のものだけを読む。
+ */
+export async function findGateFiles(cwd: string, baseSha: string): Promise<GateFile[]> {
+  const ls = await capture(["git", "ls-tree", "-r", "--name-only", "-z", baseSha, ".agents/"], cwd);
+  if (ls.code !== 0) throw new Error(`ゲート一覧を読めない: ${ls.stderr}`);
+  const paths = ls.stdout
+    .split("\0")
+    .filter((l) => /^\.agents\/autopilot-gate[^/]*\.md$/.test(l))
+    .sort();
+
+  const gates: GateFile[] = [];
+  const names = new Set<string>();
+  for (const path of paths) {
+    const show = await capture(["git", "show", `${baseSha}:${path}`], cwd, { trim: false });
+    if (show.code !== 0) throw new Error(`ゲートを読めない (${path}): ${show.stderr}`);
+    const baseName = gateNameFromPath(path);
+    let name = baseName;
+    for (let n = 2; names.has(name); n++) name = `${baseName}-${n}`;
+    names.add(name);
+    gates.push({ name, path, content: show.stdout });
+  }
+  return gates;
+}

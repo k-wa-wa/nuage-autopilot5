@@ -230,9 +230,11 @@ describe("--local", () => {
     async () => {
       setup();
       writeFileSync(join(env.dir, "result.md"), "前回の要約\n");
+      writeFileSync(join(env.dir, "needs-human.md"), "前回の引き継ぎ\n");
       env.world.scripts({ claude: { implement: [] }, agy: { review: ["say:指摘なし"] } });
       await main(["--local"]);
       expect(read("result.md")).not.toContain("前回の要約");
+      expect(existsSync(join(env.dir, "needs-human.md"))).toBe(false);
     },
     TIMEOUT,
   );
@@ -637,6 +639,50 @@ agy:
       expect(checked.stderr).toContain("知らないエージェント: copilot");
       const missing = await runMain(["models", "--file", join(env.home, "none.yaml")], opts);
       expect(missing.code).toBe(2);
+    },
+    TIMEOUT,
+  );
+});
+
+describe("リポジトリゲートの E2E", () => {
+  test.each(["implement", "gate"])(
+    "基点にあるゲートを --from %s で実行する",
+    async (from) => {
+      setup();
+      // 基点にゲートファイルを置く
+      const agentsDir = join(env.repo.work, ".agents");
+      mkdirSync(agentsDir, { recursive: true });
+      writeFileSync(join(agentsDir, "autopilot-gate.md"), "# E2E ゲート手順書\n");
+      git(env.repo.work, "add", ".agents");
+      git(env.repo.work, "commit", "-qm", "add gate");
+      git(env.repo.work, "push", "-q", "origin", "HEAD:main");
+
+      // 作業ブランチを切る
+      git(env.repo.work, "checkout", "-b", "feat/test-gate");
+
+      env.world.scripts({
+        claude: {
+          implement: ["commit"],
+          summarize: ["result"],
+        },
+        agy: {
+          review: ["say:判定: must なし\n確かめたこと: 差分"],
+          gate: ["say:判定: 合格\nゲート確認OK"],
+        },
+      });
+
+      const r = await main(["--local", "--from", from]);
+      expect(r.code).toBe(0);
+      expect(status()).toBe("done");
+
+      const calls = env.world.calls().map((c) => `${c.name}:${c.kind}`);
+      expect(calls).toContain("agy:gate");
+      if (from === "gate") expect(calls).toEqual(["agy:gate", "claude:summarize"]);
+      expect(read("gate-src-default.md")).toBe("# E2E ゲート手順書\n");
+      expect(read("gate-1-default.md")).toContain("判定: 合格");
+      expect(read("gate-1-default.md")).toContain("担当: agy");
+      expect(read("run.log")).toContain("ゲート (default): pass 担当: agy");
+      expect(read("result.md")).toBe("要約\n");
     },
     TIMEOUT,
   );

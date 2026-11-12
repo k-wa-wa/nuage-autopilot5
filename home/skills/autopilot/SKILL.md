@@ -22,6 +22,7 @@ description: 人間と合意した仕事を、裏で最後まで自走させる�
    - 実装と修正の賢さは `--level` で選ぶ。既定は `high`。文言・設定値・依存の更新のような小さく機械的な仕事は `--level standard` にする。迷ったら既定のままにする。
    - push・PR を伴わない試運転は `--local` を付ける。
    - 実装は済んでいて、レビューだけ回したい（例: 前回 `何も commit されなかった` で終わったが、PR はある）ときは `autopilot-run --from review` にする。実装を飛ばし、今のブランチの PR のレビューから始める。
+   - ゲートの試運転や PR に対するゲートのやり直しは `autopilot-run --from gate` にする。実装とレビューを飛ばし、今のブランチの PR の CI を待って全ゲートを走らせる。不合格なら修正ループへ進む。`--local --from gate` では PR・CI を使わずローカルの commit を検証する。手順書は基点の `.agents/autopilot-gate*.md` から読むため、PR で新しく足したゲートは基点に入るまで走らない。
    - 担当の優先順とモデルはホストの models.yaml で決まっている（`autopilot-run models` で確認できる）。自分で選ばない。
    - レビュー担当やモデルを人間に指定されたときだけ、`--reviewers claude,codex` や `--impl claude:MODEL` のように渡す。
 3. 「任せた。終わったら呼ぶ」とだけ返してターンを終える。

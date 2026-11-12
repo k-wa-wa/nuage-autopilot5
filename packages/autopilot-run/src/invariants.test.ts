@@ -76,6 +76,45 @@ describe("禁止事項はすべての自律ターンに届く", () => {
       );
     }
   });
+
+  test("ゲート検証担当には何も書かせない", () => {
+    const p = prompts.gate({
+      name: "e2e",
+      sourcePath: ".autopilot/gate-src-e2e.md",
+      baseSha: "abc",
+      pr: 1,
+    });
+    expect(p).toContain("ファイルは一切変更しない");
+  });
+
+  test("失敗は修正担当が隠さず、人間に返せる約束がある", () => {
+    const p = prompts.fix({
+      mode: "pr",
+      scope: "must-should",
+      reviews: [],
+      ciLog: null,
+      inbox: null,
+    });
+    expect(p).toContain("失敗を隠す修正はしない");
+    expect(p).toContain("人間に返すかを自分で判断する");
+    expect(p).toContain(".autopilot/needs-human.md");
+  });
+});
+
+describe("ゲートは基点から読む", () => {
+  test("github.ts の findGateFiles は baseSha を渡して git ls-tree と git show で基点の木を読む", () => {
+    const gh = sources.find((s) => s.name === "github.ts")!.text;
+    expect(gh).toContain("findGateFiles");
+    expect(gh).toMatch(/git", "ls-tree", "-r", "--name-only", "-z", baseSha/);
+    expect(gh).toMatch(/git", "show", `\$\{baseSha\}:\$\{path\}`/);
+    const p = prompts.gate({
+      name: "e2e",
+      sourcePath: ".autopilot/gate-src-e2e.md",
+      baseSha: "abc",
+      pr: 1,
+    });
+    expect(p).toContain("作業ツリーの .agents/autopilot-gate*.md は読まない");
+  });
 });
 
 describe("人間がいない前提で動く", () => {

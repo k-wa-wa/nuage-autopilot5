@@ -80,6 +80,7 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
 export async function capture(
   argv: string[],
   cwd: string,
+  opts: { trim?: boolean } = {},
 ): Promise<RunResult & { stderr: string }> {
   const [cmd, ...args] = argv;
   if (!cmd) throw new Error("empty argv");
@@ -88,7 +89,11 @@ export async function capture(
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
   ]);
-  return { code: await proc.exited, stdout: out.trim(), stderr: err.trim() };
+  return {
+    code: await proc.exited,
+    stdout: opts.trim === false ? out : out.trim(),
+    stderr: err.trim(),
+  };
 }
 
 /** 実行中の子をプロセスグループごと止める。 */

@@ -82,8 +82,7 @@ ${COMMON_REVIEW_RULES}`;
 ${COMMON_REVIEW_RULES}`;
 }
 
-/**
- * レビューに must があるか。1 行目の判定だけを読む。
+/** レビューに must があるか。1 行目の判定だけを読む。
  * 判定が読めなければ、見落としより再レビューの方が安いので must ありとみなす。
  */
 export function reviewHasMust(text: string): boolean {
@@ -92,6 +91,64 @@ export function reviewHasMust(text: string): boolean {
     .map((l) => l.replace(/[*#`>_\s]/g, ""))
     .find((l) => l !== "");
   return first !== VERDICT.none.replace(/\s/g, "");
+}
+
+/** ゲートの 1 行目。pipeline はこれを読んで合否・対象外・判定不能を決める。 */
+export const GATE_VERDICT = {
+  pass: "判定: 合格",
+  fail: "判定: 不合格",
+  skip: "判定: 対象外",
+  inconclusive: "判定: 判定不能",
+} as const;
+
+export type GateVerdict = "pass" | "fail" | "skip" | "inconclusive" | "unknown";
+
+/**
+ * ゲートの 1 行目を読む。
+ * 判定が読めなければ unknown を返す。
+ */
+export function parseGateVerdict(text: string): GateVerdict {
+  const first = text
+    .split("\n")
+    .map((l) => l.replace(/[*#`>_\s]/g, ""))
+    .find((l) => l !== "");
+  if (!first) return "unknown";
+  if (first === GATE_VERDICT.pass.replace(/\s/g, "")) return "pass";
+  if (first === GATE_VERDICT.fail.replace(/\s/g, "")) return "fail";
+  if (first === GATE_VERDICT.skip.replace(/\s/g, "")) return "skip";
+  if (first === GATE_VERDICT.inconclusive.replace(/\s/g, "")) return "inconclusive";
+  return "unknown";
+}
+
+export interface GateInput {
+  name: string;
+  sourcePath: string;
+  baseSha: string;
+  pr: number | null;
+}
+
+export function gate(input: GateInput): string {
+  const prInfo = input.pr
+    ? `PR 番号は #${input.pr} である。`
+    : "PR 番号はない（--local で実行中）。Preview 環境が必要なゲートは「対象外」と判定する。";
+
+  return `あなたはリポジトリのゲート検証担当である。ファイルは一切変更しない。
+ゲートの手順書 ${input.sourcePath} を読み、書かれた手順を実際に実行して確かめる。
+これは基点から取り出した手順書である。作業ツリーの .agents/autopilot-gate*.md は読まない。
+${prInfo}
+基点のコミットは ${input.baseSha} である。変更内容は \`git diff ${input.baseSha}...HEAD\` で確認できる。
+
+ゲートの手順書の「守ること」（読み取り専用など）を最優先にする。
+外部システムの一時的なエラー・環境が立ち上がらない等で確かめられなかったときは、不合格ではなく判定不能と書く。
+
+1 行目は次のどれか 1 つだけを書く:
+- ${GATE_VERDICT.pass} — 確かめて問題なし
+- ${GATE_VERDICT.fail} — 確かめて、この変更に問題がある
+- ${GATE_VERDICT.skip} — 手順書の対象外の条件に当たる、または --local で必要な Preview が無い
+- ${GATE_VERDICT.inconclusive} — 外部要因でコードの良否を判定できない
+判定の行には説明やほかの語を足さない。
+
+2 行目以降に、実行したこと・結果・不合格や判定不能の根拠（どのコマンドがどう失敗したか）を書く。`;
 }
 
 /** 修正で直す範囲。1 周目は should まで直し、2 周目以降は must だけにして指摘の連鎖を止める。 */
@@ -103,12 +160,16 @@ export interface FixInput {
   reviews: string[];
   ciLog: string | null;
   inbox: string | null;
+  gateLogs?: string[];
 }
 
 export function fix(input: FixInput): string {
   const items = [
     input.inbox && `人間からの追加指示: ${input.inbox}（最優先）`,
-    input.ciLog && `CI の失敗ログ: ${input.ciLog}（必ず直す）`,
+    input.ciLog && `CI の失敗ログ: ${input.ciLog}`,
+    input.gateLogs &&
+      input.gateLogs.length > 0 &&
+      `ゲートの不合格結果: ${input.gateLogs.join(", ")}`,
     input.reviews.length > 0 && `レビュー結果: ${input.reviews.join(", ")}`,
   ].filter(Boolean);
   const scope =
@@ -120,9 +181,13 @@ export function fix(input: FixInput): string {
 次のファイルを読み、直すべきものを直す。
 ${items.map((i) => `- ${i}`).join("\n")}
 
+受け取った指摘・失敗ログ・不合格結果を読み、コードを直すか、人間に返すかを自分で判断する（例: 外部システムの一時的なエラー、環境・認証・権限の問題、仕様の解釈で人間の判断が要るものなど、コードで片付かないものは人間に返す）。
+失敗を隠す修正はしない（テストの削除・skip、リトライで覆う、期待値やゲートの基準を緩める等）。
+
 ${scope}直さない指摘は要約で人間に渡すので、ここで手を入れなくてよい。
 must を見送るときは、理由を .autopilot/decisions.md に書く。
-直したらテストを通して ${ship(input.mode)}
+直せるものは直してテストを通して ${ship(input.mode)}
+そのうえで人間に返すものがあれば、理由を .autopilot/needs-human.md に書く。
 直すものが無ければ何も変更しない。変更しないことは失敗ではない。`;
 }
 
@@ -137,9 +202,11 @@ export function summarize(
       : "";
   return `${RULES}
 
-.autopilot/brief.md・decisions.md・review-*.md と \`git log ${baseSha}..HEAD\` を元に、人間向けの要約を .autopilot/result.md に書く。
-内容: 何をしたか / 主な判断とその理由 / 見送った指摘 / 人間の判断が必要なこと（無ければ「なし」）。短く。
-レビュー結果について、観点ごとの担当（CLI・モデル）、観点ごとの must / should の件数、片方の観点しか挙げなかった must、欠けた観点があればその旨を書く。${missing}${
+.autopilot/brief.md・decisions.md・review-*.md・gate-*.md・needs-human.md（存在する場合）と \`git log ${baseSha}..HEAD\` を元に、人間向けの要約を .autopilot/result.md に書く。
+内容: 何をしたか / 主な判断とその理由 / 見送った指摘 / 人間の判断が必要なこと。needs-human.md の理由や、ゲートの判定不能・実行失敗なども確認し、判断が必要なことが無ければ「なし」と書く。短く。
+レビュー結果について、観点ごとの担当（CLI・モデル）、観点ごとの must / should の件数、片方の観点しか挙げなかった must、欠けた観点があればその旨を書く。${missing}
+gate-src-*.md は手順書なので結果と混同しない。run.log と照合して今回の実行の結果だけを扱う。
+ゲート結果について、ゲートごとの判定と担当（CLI・モデル）を書く（対象外・判定不能もその旨を書く）。${
     pr ? `\nPR #${pr} の本文も同じ内容で gh pr edit --body により更新する。` : ""
   }`;
 }

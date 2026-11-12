@@ -1,21 +1,23 @@
 import { type FailureKind, formatInvocation, type Invocation } from "./agents.ts";
 import { type CiVerdict, judgeCi } from "./ci.ts";
-import type { GitHub } from "./github.ts";
+import type { GateFile, GitHub } from "./github.ts";
 import type { Assignee, Assignment } from "./models.ts";
 import * as prompts from "./prompts.ts";
 
 /**
  * 任された仕事を最後まで進める流れ。
  *
- *   実装 → PR → [CI 待ち ‖ レビュー → 修正] を上限回数まで → 要約
+ *   実装 → PR → [CI 待ち ‖ レビュー → 修正] を上限回数まで → ゲート → 要約
  *
  * 修正ループは、指摘の連鎖で上限まで回らないように絞る。
  * - 1 周目は must と should を直し、2 周目以降は must だけを直す。nit と見送った指摘は要約で人間に渡す
  * - レビューに must が無ければ、直した後に再レビューしない（CI だけ確かめる）
  * - CI 待ちとレビューは同時に進める。レビューは CI の結果を使わない
  * - 修正担当は実装担当の会話の続きで動く。コードを一から読み直さずに済む
+ * - 修正ループが done で終わろうとするときにゲートを走らせる。不合格なら修正ループへ戻る
  *
  * --from review では実装を飛ばし、今のブランチの PR（--local ならローカルの commit）のレビューから始める。
+ * --from gate では実装とレビューを飛ばし、CI を待ってからゲートだけを走らせる。
  *
  * 順序と待ちはここが持ち、判断は LLM に任せる。
  * 成否はエージェントの自己申告ではなく、commit・PR・push が実際にできたかで判定する。
@@ -27,8 +29,8 @@ import * as prompts from "./prompts.ts";
 /** CI の状態を読み直す間隔。 */
 export const CI_POLL_MS = 30_000;
 
-/** どこから始めるか。review は実装が済んでいて、レビューだけ回したいとき。 */
-export const START_POINTS = ["implement", "review"] as const;
+/** どこから始めるか。review はレビューから、gate はゲートから。 */
+export const START_POINTS = ["implement", "review", "gate"] as const;
 export type StartPoint = (typeof START_POINTS)[number];
 
 export interface Config extends Assignment {
@@ -62,6 +64,8 @@ export interface Deps {
   head(): Promise<string>;
   /** 作業ツリーの状態（HEAD・未 commit の変更）を表す値。エージェントが何か変えたかを比べる。 */
   fingerprint(): Promise<string>;
+  /** 基点の木にあるゲートファイルを見つける。 */
+  findGates(baseSha: string): Promise<GateFile[]>;
   /** PR と CI。--local のときは null。 */
   github: GitHub | null;
   clock: {
@@ -74,6 +78,7 @@ export interface Deps {
     rel(name: string): string;
     file(name: string): string;
     read(name: string): string | null;
+    write(name: string, text: string): void;
     append(name: string, text: string): void;
     takeInbox(round: number): string | null;
   };
@@ -223,9 +228,11 @@ async function rounds(
   missingPerspectives: Set<string>,
 ): Promise<Outcome> {
   /** 今の HEAD にレビューが要るか。must の無いレビューの後の修正は、CI だけ確かめる。 */
-  let needsReview = true;
+  let needsReview = cfg.from !== "gate";
   /** 前回レビューした HEAD。2 周目以降のレビューは、ここからの修正を中心に見る。 */
   let reviewedAt: string | null = null;
+  /** 直前の周で直せなかったゲート不合格。次の周の修正担当へ渡す。 */
+  let pendingGateFailures: string[] | null = null;
 
   for (let round = 1; round <= cfg.maxRounds; round++) {
     const head = await d.head();
@@ -280,14 +287,24 @@ async function rounds(
     const inboxName = d.state.takeInbox(round);
     const inbox = inboxName ? d.state.rel(inboxName) : null;
 
-    if (!must && ciLog === null && inbox === null) {
+    let gateLogs: string[] = pendingGateFailures ?? [];
+    pendingGateFailures = null;
+
+    if (!must && ciLog === null && inbox === null && gateLogs.length === 0) {
       if (reviews === null) {
-        d.state.log("前の修正は must ではないので、CI だけ確かめて再レビューせずに終える");
-        return { kind: "done" };
-      }
-      if (round > 1) {
+        d.state.log("レビューは不要なので、CI の確認後にゲートへ進む");
+      } else if (round > 1) {
         d.state.log("レビューに must が無いので、何も直さずに終える");
-        return { kind: "done" };
+      }
+      if (reviews === null || round > 1) {
+        const gateOutcome = await runGates(cfg, d, runner, round, pr);
+        if (gateOutcome.kind === "pass" || gateOutcome.kind === "none") {
+          return { kind: "done" };
+        }
+        if (gateOutcome.kind === "needs-human") {
+          return { kind: "needs-human", reason: gateOutcome.reason };
+        }
+        gateLogs = gateOutcome.failures;
       }
     }
 
@@ -298,17 +315,47 @@ async function rounds(
       reviews: (reviews ?? []).map((name) => d.state.rel(name)),
       ciLog,
       inbox,
+      gateLogs,
     });
     if (!(await writer.run(cfg.fix, prompt))) {
       return { kind: "failed", reason: "修正担当が異常終了した" };
     }
 
-    if ((await d.head()) === head) {
-      return ciLog ? { kind: "needs-human", reason: "CI の失敗を直せなかった" } : { kind: "done" };
+    const needsHuman = d.state.read("needs-human.md")?.trim();
+    if (needsHuman) {
+      const reason =
+        needsHuman
+          .split("\n")
+          .map((l) => l.trim())
+          .find((l) => l.length > 0) ?? "修正担当が人間に判断を求めた";
+      return { kind: "needs-human", reason };
     }
-    // CI だけを直した修正は、CI が通れば足りる。
-    needsReview = must || inbox !== null;
-    if (!needsReview) d.state.log("must の無い修正なので、次は CI だけ確かめる");
+
+    if ((await d.head()) === head) {
+      if (ciLog) return { kind: "needs-human", reason: "CI の失敗を直せなかった" };
+      if (gateLogs.length > 0)
+        return { kind: "needs-human", reason: "ゲートの不合格を直せなかった" };
+      const gateOutcome = await runGates(cfg, d, runner, round, pr);
+      if (gateOutcome.kind === "pass" || gateOutcome.kind === "none") {
+        return { kind: "done" };
+      }
+      if (gateOutcome.kind === "needs-human") {
+        return { kind: "needs-human", reason: gateOutcome.reason };
+      }
+      pendingGateFailures = gateOutcome.failures;
+      needsReview = false;
+      continue;
+    }
+
+    // 不合格を直した後は、レビューし直さず、CI と全ゲートを確かめ直す
+    needsReview = (must || inbox !== null) && gateLogs.length === 0;
+    if (!needsReview) {
+      d.state.log(
+        gateLogs.length > 0
+          ? "ゲートの不合格を直したので、次は CI と全ゲートを確かめる"
+          : "must の無い修正なので、次は CI だけ確かめる",
+      );
+    }
   }
   return {
     kind: "needs-human",
@@ -369,4 +416,89 @@ async function waitCi(d: Deps, github: GitHub, pr: number): Promise<CiVerdict> {
     lastWhy = v.why;
     await d.clock.sleep(CI_POLL_MS);
   }
+}
+
+type GateOutcome =
+  | { kind: "pass" }
+  | { kind: "none" }
+  | { kind: "fail"; failures: string[] }
+  | { kind: "needs-human"; reason: string };
+
+/**
+ * リポジトリのゲート（.agents/autopilot-gate*.md）を並列に実行する。
+ * 基点の木から読んだ手順書を実行し、合否を判定する。
+ */
+async function runGates(
+  cfg: Config,
+  d: Deps,
+  runner: Runner,
+  round: number,
+  pr: number | null,
+): Promise<GateOutcome> {
+  let gateFiles: GateFile[];
+  try {
+    gateFiles = await d.findGates(cfg.baseSha);
+  } catch (e) {
+    const reason = `ゲートの手順書を読めない: ${e instanceof Error ? e.message : String(e)}`;
+    d.state.log(reason);
+    return { kind: "needs-human", reason };
+  }
+  if (gateFiles.length === 0) {
+    d.state.log("ゲートなし");
+    return { kind: "none" };
+  }
+
+  d.state.stage(`gating (round ${round}: ${gateFiles.map((g) => g.name).join(", ")})`);
+
+  const results = await Promise.all(
+    gateFiles.map(async (g) => {
+      const srcFile = `gate-src-${g.name}.md`;
+      d.state.write(srcFile, g.content);
+
+      const outName = `gate-${round}-${g.name}.md`;
+      const prompt = prompts.gate({
+        name: g.name,
+        sourcePath: d.state.rel(srcFile),
+        baseSha: cfg.baseSha,
+        pr,
+      });
+
+      const r = await runner.run(cfg.gate, prompt, { writes: false, output: outName });
+      if (r.ok && r.invocation) {
+        const invStr = formatInvocation(r.invocation);
+        d.state.append(outName, `\n担当: ${invStr}\n`);
+        const content = d.state.read(outName) ?? "";
+        const verdict = prompts.parseGateVerdict(content);
+        d.state.log(`ゲート (${g.name}): ${verdict} 担当: ${invStr}`);
+        return { name: g.name, verdict, file: outName };
+      }
+      d.state.log(`ゲート失敗 (${g.name}): ${cfg.gate.name} の全候補が失敗した`);
+      return { name: g.name, verdict: "failed_run" as const, file: outName };
+    }),
+  );
+
+  const failedRun = results.find((r) => r.verdict === "failed_run");
+  if (failedRun) {
+    return { kind: "needs-human", reason: `ゲート担当が全員失敗した: ${failedRun.name}` };
+  }
+
+  const inconclusive = results.find((r) => r.verdict === "inconclusive");
+  if (inconclusive) {
+    return { kind: "needs-human", reason: `ゲートが判定不能: ${inconclusive.name}` };
+  }
+
+  const unknown = results.find((r) => r.verdict === "unknown");
+  if (unknown) {
+    return { kind: "needs-human", reason: `ゲートの判定を読めない: ${unknown.name}` };
+  }
+
+  const fails = results.filter((r) => r.verdict === "fail");
+  if (fails.length > 0) {
+    return {
+      kind: "fail",
+      failures: fails.map((f) => d.state.rel(f.file)),
+    };
+  }
+
+  return { kind: "pass" };
 }

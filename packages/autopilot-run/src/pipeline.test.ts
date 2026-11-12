@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { CI_LIMITS } from "./ci.ts";
 import { assignRoles } from "./models.ts";
 import { reviewFileName, runPipeline } from "./pipeline.ts";
-import { VERDICT } from "./prompts.ts";
+import { GATE_VERDICT, VERDICT } from "./prompts.ts";
 import { assignee, checks, pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
 const cfg = pipelineConfig(assignee("claude"), [assignee("agy"), assignee("codex")]);
@@ -577,5 +577,264 @@ describe("reviewFileName", () => {
     expect(a).toBe("review-1-free.md");
     expect(b).toBe("review-1-coverage.md");
     expect(a).not.toBe(b);
+  });
+});
+
+describe("runPipeline: リポジトリごとのゲート実行", () => {
+  const gateCfg = pipelineConfig(assignee("claude"), [assignee("agy")]);
+  const none = () => `${VERDICT.none}\n- nit: よい`;
+
+  test("ゲートなし: ログに「ゲートなし」と残して完了する", async () => {
+    const h = pipelineHarness({ commits: [true, false], gates: [] });
+    expect(await runPipeline(gateCfg, h.deps)).toEqual({ kind: "done" });
+    expect(h.logs).toContain("ゲートなし");
+    expect(h.calls.filter((c) => c.kind === "gate")).toHaveLength(0);
+  });
+
+  test("全合格で done: ゲートを実行し合格なら完了し、担当と判定が記録される", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      gates: [{ name: "e2e" }],
+      gate: () => `${GATE_VERDICT.pass}\nE2E すべて成功`,
+    });
+    expect(await runPipeline(gateCfg, h.deps)).toEqual({ kind: "done" });
+    const gates = h.calls.filter((c) => c.kind === "gate");
+    expect(gates).toHaveLength(1);
+    expect(gates[0]?.output).toBe("gate-1-e2e.md");
+    expect(h.deps.state.read("gate-1-e2e.md")).toContain(GATE_VERDICT.pass);
+    expect(h.deps.state.read("gate-1-e2e.md")).toContain("担当: agy");
+    expect(h.logs.some((l) => l.includes("ゲート (e2e): pass 担当: agy"))).toBe(true);
+  });
+
+  test("対象外は合格扱い: 判定が「対象外」なら合格扱いで done になる", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      gates: [{ name: "preview" }],
+      gate: () => `${GATE_VERDICT.skip}\n--local のため Preview なし`,
+    });
+    expect(await runPipeline(gateCfg, h.deps)).toEqual({ kind: "done" });
+    expect(h.logs.some((l) => l.includes("ゲート (preview): skip"))).toBe(true);
+  });
+
+  test("不合格で修正 → CI と全ゲートをやり直す（レビューはしない）", async () => {
+    const h = pipelineHarness({
+      commits: [true, false, true, false],
+      github: { pr: 56 },
+      review: none,
+      gates: [{ name: "e2e" }, { name: "perf" }],
+      gate: (round, name) => {
+        if (round === 1 && name === "e2e") return `${GATE_VERDICT.fail}\nログイン失敗`;
+        return `${GATE_VERDICT.pass}\n成功`;
+      },
+    });
+    expect(await runPipeline(gateCfg, h.deps)).toEqual({ kind: "done" });
+
+    // round 1 で 2 つのゲート実行
+    const round1Gates = h.calls.filter((c) => c.kind === "gate" && c.output?.startsWith("gate-1-"));
+    expect(round1Gates).toHaveLength(2);
+
+    // 修正担当のプロンプトにゲート不合格結果が渡る
+    const fixes = h.calls.filter((c) => c.kind === "fix");
+    const secondFix = fixes[1]!;
+    expect(secondFix.prompt).toContain("ゲートの不合格結果: .autopilot/gate-1-e2e.md");
+
+    // 不合格を直した後はレビューは走らず、全ゲートを再実行する
+    const laterReviews = h.calls.filter(
+      (c) => c.kind === "review" && !c.output?.startsWith("review-1-"),
+    );
+    expect(laterReviews).toHaveLength(0);
+
+    const reGates = h.calls.filter((c) => c.kind === "gate" && c.output?.startsWith("gate-3-"));
+    expect(reGates).toHaveLength(2);
+    expect(h.logs).toContain("ゲートの不合格を直したので、次は CI と全ゲートを確かめる");
+    expect(h.logs.filter((l) => l === "CI: pass")).toHaveLength(3);
+  });
+
+  test("判定不能で needs-human: 修正ループに入らず即座に終了する", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      gates: [{ name: "e2e" }],
+      gate: () => `${GATE_VERDICT.inconclusive}\n外部システム 503 エラー`,
+    });
+    const o = await runPipeline(gateCfg, h.deps);
+    expect(o.kind).toBe("needs-human");
+    if (o.kind !== "needs-human") throw new Error("人間への引き継ぎを期待した");
+    expect(o.reason).toContain("ゲートが判定不能: e2e");
+    // 修正担当は呼ばれない
+    expect(h.calls.filter((c) => c.kind === "fix")).toHaveLength(1); // 1周目の初期 fix のみで、ゲート不合格による追加 fix は呼ばれない
+  });
+
+  test("判定不能と不合格が混ざったら needs-human を優先する", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      gates: [{ name: "fail-gate" }, { name: "inconclusive-gate" }],
+      gate: (_, name) =>
+        name === "fail-gate"
+          ? `${GATE_VERDICT.fail}\nバグあり`
+          : `${GATE_VERDICT.inconclusive}\nタイムアウト`,
+    });
+    const o = await runPipeline(gateCfg, h.deps);
+    expect(o.kind).toBe("needs-human");
+    if (o.kind !== "needs-human") throw new Error("人間への引き継ぎを期待した");
+    expect(o.reason).toContain("ゲートが判定不能: inconclusive-gate");
+  });
+
+  test("読めない判定で needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      gates: [{ name: "e2e" }],
+      gate: () => "何らかの出力（判定ヘッダなし）",
+    });
+    const o = await runPipeline(gateCfg, h.deps);
+    expect(o.kind).toBe("needs-human");
+    if (o.kind !== "needs-human") throw new Error("人間への引き継ぎを期待した");
+    expect(o.reason).toContain("ゲートの判定を読めない: e2e");
+  });
+
+  test("ゲート担当が全候補で失敗したら needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      gates: [{ name: "e2e" }],
+      failAgent: (_, kind) => kind === "gate",
+    });
+    const o = await runPipeline(gateCfg, h.deps);
+    expect(o.kind).toBe("needs-human");
+    if (o.kind !== "needs-human") throw new Error("人間への引き継ぎを期待した");
+    expect(o.reason).toContain("ゲート担当が全員失敗した: e2e");
+  });
+
+  test("不合格で HEAD が変わらず needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [true, false, false],
+      review: none,
+      gates: [{ name: "e2e" }],
+      gate: () => `${GATE_VERDICT.fail}\n壊れている`,
+    });
+    const o = await runPipeline(gateCfg, h.deps);
+    expect(o.kind).toBe("needs-human");
+    if (o.kind !== "needs-human") throw new Error("人間への引き継ぎを期待した");
+    expect(o.reason).toContain("ゲートの不合格を直せなかった");
+  });
+
+  test("上限で needs-human: ゲート不合格が続き上限に達したら終了する", async () => {
+    const h = pipelineHarness({
+      commits: [true, true, true, true],
+      review: none,
+      gates: [{ name: "e2e" }],
+      gate: () => `${GATE_VERDICT.fail}\nずっと失敗`,
+    });
+    const o = await runPipeline(gateCfg, h.deps);
+    expect(o.kind).toBe("needs-human");
+    if (o.kind !== "needs-human") throw new Error("人間への引き継ぎを期待した");
+    expect(o.reason).toContain("修正ループが上限（3 回）に達した");
+  });
+
+  test("needs-human.md が書かれたら次の周に進まない", async () => {
+    const h = pipelineHarness({
+      commits: [true, true],
+      review: () => `${VERDICT.must}\n- must: 権限エラー`,
+    });
+    // 修正担当のターンで needs-human.md を作成する
+    const originalRunAgent = h.deps.runAgent;
+    h.deps.runAgent = async (inv, prompt, opts) => {
+      const res = await originalRunAgent(inv, prompt, opts);
+      if (prompt.includes("直すべきもの")) {
+        h.deps.state.write(
+          "needs-human.md",
+          "外部環境の AWS 認証情報が設定されておらず、コード修正では対応できない\n詳細...",
+        );
+      }
+      return res;
+    };
+    const o = await runPipeline(gateCfg, h.deps);
+    expect(o.kind).toBe("needs-human");
+    if (o.kind !== "needs-human") throw new Error("人間への引き継ぎを期待した");
+    expect(o.reason).toBe("外部環境の AWS 認証情報が設定されておらず、コード修正では対応できない");
+    // 修正担当の直後に終了し、round 2 には進まない
+    expect(h.calls.at(-1)?.kind).toBe("summarize");
+  });
+});
+
+describe("runPipeline: --from gate", () => {
+  const fromGate = pipelineConfig(assignee("claude"), [assignee("agy")], { from: "gate" });
+
+  test("複数ゲートは全担当が開始してから結果を待つ", async () => {
+    const h = pipelineHarness({ commits: [], gates: [{ name: "a" }, { name: "b" }] });
+    let release = () => {};
+    const bothStarted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const run = h.deps.runAgent;
+    let count = 0;
+    h.deps.runAgent = async (inv, prompt, opts) => {
+      if (opts?.output?.startsWith("gate-")) {
+        if (++count === 2) release();
+        await bothStarted;
+      }
+      return run(inv, prompt, opts);
+    };
+    expect(await runPipeline(fromGate, h.deps)).toEqual({ kind: "done" });
+    expect(count).toBe(2);
+    expect(h.calls[0]?.prompt).toContain("PR 番号はない");
+  });
+
+  test("PR の HEAD と CI が揃う前にゲートを始めない", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      startHead: 2,
+      github: {
+        pr: 56,
+        snapshots: [() => ({ head: "sha1", checks: ["pass"] }), checks("pending"), checks("pass")],
+      },
+      gates: [{ name: "e2e" }],
+    });
+    expect(await runPipeline(fromGate, h.deps)).toEqual({ kind: "done" });
+    expect(h.calls[0]?.kind).toBe("gate");
+    expect(h.calls[0]?.at).toBe(60_000);
+    expect(h.calls[0]?.prompt).toContain("PR 番号は #56");
+  });
+
+  test("ゲートの利用不能時だけレビュー順の次の担当へ切り替える", async () => {
+    const roles = assignRoles({ level: "high" }, {});
+    for (const failure of ["unavailable", "error"] as const) {
+      const h = pipelineHarness({
+        commits: [],
+        gates: [{ name: "e2e" }],
+        failure,
+        failAgent: (inv, kind) => kind === "gate" && inv.agent === "claude",
+      });
+      const outcome = await runPipeline({ ...fromGate, ...roles }, h.deps);
+      expect(outcome.kind).toBe(failure === "unavailable" ? "done" : "needs-human");
+      expect(h.calls.filter((c) => c.kind === "gate").map((c) => c.inv.agent)).toEqual(
+        failure === "unavailable" ? ["claude", "codex"] : ["claude"],
+      );
+    }
+  });
+
+  test("実装とレビューを飛ばし、CI を待ってからゲートだけを走らせる", async () => {
+    const h = pipelineHarness({
+      commits: [false],
+      startHead: 2,
+      github: { pr: 56 },
+      gates: [{ name: "e2e" }],
+      gate: () => `${GATE_VERDICT.pass}\n成功`,
+    });
+    expect(await runPipeline(fromGate, h.deps)).toEqual({ kind: "done" });
+    expect(h.calls.map((c) => c.kind)).toEqual(["gate", "summarize"]);
+    expect(h.stages.some((s) => s.startsWith("implementing"))).toBe(false);
+    expect(h.stages.some((s) => s.startsWith("reviewing"))).toBe(false);
+  });
+
+  test("--from gate で不合格なら通常どおり修正ループへ入る", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      startHead: 2,
+      github: { pr: 56 },
+      gates: [{ name: "e2e" }],
+      gate: (round) =>
+        round === 1 ? `${GATE_VERDICT.fail}\n壊れている` : `${GATE_VERDICT.pass}\n成功`,
+    });
+    expect(await runPipeline(fromGate, h.deps)).toEqual({ kind: "done" });
+    expect(h.calls.map((c) => c.kind)).toEqual(["gate", "fix", "gate", "summarize"]);
   });
 });

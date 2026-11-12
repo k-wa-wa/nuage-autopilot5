@@ -19,6 +19,8 @@ import { join } from "node:path";
  *   agent-stdout.log  会話を引き継ぐ実行（実装・修正）の生の標準出力。本文は run.log にも書く
  *   run.pid       実行中のプロセス
  *   decisions.md  実装担当が書く。判断とその理由
+ *   needs-human.md 修正担当が書く。コードで片付かず人間に返す理由
+ *   gate-*.md     ゲート検証担当が書く。手順の実行結果と合否
  *   result.md     最後に実装担当が書く。人間向けの要約
  */
 
@@ -59,6 +61,10 @@ export class State {
   read(name: string): string | null {
     const path = this.file(name);
     return existsSync(path) ? readFileSync(path, "utf8") : null;
+  }
+
+  write(name: string, text: string): void {
+    writeFileSync(this.file(name), text);
   }
 
   append(name: string, text: string): void {
