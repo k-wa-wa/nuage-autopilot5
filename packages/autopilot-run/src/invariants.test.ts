@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AGENTS, buildArgv } from "./agents.ts";
+import { assignRoles } from "./models.ts";
+import { runPipeline } from "./pipeline.ts";
 import * as prompts from "./prompts.ts";
+import { pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
 /**
  * 設計の約束（AGENTS.md「設計の約束」と home/）が守られているかのテスト。
@@ -20,7 +23,9 @@ const filesContaining = (pattern: RegExp) =>
 
 describe("責務が 1 箇所に閉じている", () => {
   test("エージェント CLI の起動方法は agents.ts だけが知る", () => {
-    expect(filesContaining(/--dangerously-skip-permissions|--yolo/)).toEqual(["agents.ts"]);
+    expect(
+      filesContaining(/--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox/),
+    ).toEqual(["agents.ts"]);
   });
 
   test("gh の呼び出しは github.ts だけが行う", () => {
@@ -73,8 +78,14 @@ describe("人間がいない前提で動く", () => {
   test("どのエージェントも非対話・権限確認なしで起動する", () => {
     for (const agent of AGENTS) {
       const argv = buildArgv({ agent }, "PROMPT");
-      expect(argv).toContain("-p");
-      expect(argv.some((a) => a === "--dangerously-skip-permissions" || a === "--yolo")).toBe(true);
+      expect(argv).toContain(agent === "codex" ? "exec" : "-p");
+      expect(
+        argv.some(
+          (a) =>
+            a === "--dangerously-skip-permissions" ||
+            a === "--dangerously-bypass-approvals-and-sandbox",
+        ),
+      ).toBe(true);
     }
   });
 });
@@ -140,5 +151,38 @@ describe("全エージェント共通のルール（home/）", () => {
 
   test("スキルの frontmatter に name と description がある（エージェントが見つけられる）", () => {
     expect(skill).toMatch(/^---\nname: autopilot\ndescription: .+\n---/);
+  });
+});
+
+describe("担当の切り替えの約束", () => {
+  const roles = assignRoles({ level: "high" }, {});
+  const cfg = { ...pipelineConfig(roles.implement, roles.reviewers), ...roles };
+
+  test("通常は実装 agy、レビュー claude。同じ CLI の独立したレビューも指定できる", () => {
+    expect(roles.implement.chain[0]!.agent).toBe("agy");
+    expect(roles.reviewers).toHaveLength(1);
+    expect(roles.reviewers[0]!.chain[0]!.agent).toBe("claude");
+    expect(AGENTS).toEqual(["claude", "agy", "codex"]);
+  });
+
+  test("利用不能以外の失敗と変更途中の失敗では担当を切り替えない", async () => {
+    for (const failure of ["error", "unavailable"] as const) {
+      const h = pipelineHarness({
+        commits: [],
+        failure,
+        failAgent: () => true,
+        dirtyOnFail: () => failure === "unavailable",
+      });
+      expect((await runPipeline(cfg, h.deps)).kind).toBe("failed");
+      expect(h.calls).toHaveLength(1);
+    }
+  });
+
+  test("窓口スキルは通常の起動で担当を明示しない", () => {
+    const skill = readFileSync(join(SRC, "../../../home/skills/autopilot/SKILL.md"), "utf8");
+    const examples = [...skill.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]!);
+    expect(examples).toContain("   autopilot-run\n   ");
+    for (const example of examples) expect(example).not.toMatch(/--impl|--reviewers/);
+    expect(skill).toContain("特別な指示がない限り --impl と --reviewers は使わない");
   });
 });

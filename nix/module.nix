@@ -34,9 +34,9 @@ let
       rules = ".gemini/AGENTS.md";
       skills = ".gemini/config/skills";
     };
-    copilot = {
-      rules = ".copilot/copilot-instructions.md";
-      skills = ".copilot/skills";
+    codex = {
+      rules = ".codex/AGENTS.md";
+      skills = ".agents/skills";
     };
   };
 
@@ -88,7 +88,7 @@ in
       default = null;
       example = lib.literalExpression "./models.yaml";
       description = ''
-        段階 (high / standard / light) ごとのモデルの並び。エージェント → 段階 → 前から順に試すモデルで書く。
+        担当の優先順 (roles.impl / roles.review) と段階 (high / standard / light) ごとのモデルの並び。エージェント → 段階 → 前から順に試すモデルで書く。
         モデルは頻繁に変わるので、モデル名はこのファイルだけに書く。null なら各 CLI の既定モデルで動く。
       '';
     };

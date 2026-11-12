@@ -14,16 +14,16 @@ description: 人間と合意した仕事を、裏で最後まで自走させる�
 
 1. `.autopilot/brief.md` を書く。実装担当はこの会話を知らないため、合意した仕様や受け入れ条件をこれだけで作業できるようにまとめる。
    - 目的 / 仕様と受け入れ条件 / 会話で決めたこと / 任せる判断（担当の裁量でよいこと）/ 関連 Issue・PR
-2. `autopilot-run` をシェルで起動する。実装担当には自分と同じエージェントを指定する。レビューは自動で他のエージェントが担当する。
+2. `autopilot-run` をシェルで起動する。通常の実装担当は agy、レビュー担当は claude。利用不能時の代替順はホストの models.yaml で決まる。特別な指示がない限り --impl と --reviewers は使わない。
    ```bash
-   autopilot-run --impl claude
+   autopilot-run
    ```
    - シェルのツールの裏実行（終わったら知らせが来る実行）で起動する。`nohup` や `&` でシェルから切り離さない。切り離すと、終わっても知らせが来ず、起こされない。
    - 実装と修正の賢さは `--level` で選ぶ。既定は `high`。文言・設定値・依存の更新のような小さく機械的な仕事は `--level standard` にする。迷ったら既定のままにする。
    - push・PR を伴わない試運転は `--local` を付ける。
-   - 実装は済んでいて、レビューだけ回したい（例: 前回 `何も commit されなかった` で終わったが、PR はある）ときは `autopilot-run --impl claude --from review` にする。実装を飛ばし、今のブランチの PR のレビューから始める。
-   - モデルは段階ごとにホストの models.yaml で決まっている（`autopilot-run models` で確認できる）。自分で選ばない。
-   - レビュー担当やモデルを人間に指定されたときだけ、`--reviewers agy,copilot` や `--impl claude:MODEL` のように渡す。
+   - 実装は済んでいて、レビューだけ回したい（例: 前回 `何も commit されなかった` で終わったが、PR はある）ときは `autopilot-run --from review` にする。実装を飛ばし、今のブランチの PR のレビューから始める。
+   - 担当の優先順とモデルはホストの models.yaml で決まっている（`autopilot-run models` で確認できる）。自分で選ばない。
+   - レビュー担当やモデルを人間に指定されたときだけ、`--reviewers claude,codex` や `--impl claude:MODEL` のように渡す。
 3. 「任せた。終わったら呼ぶ」とだけ返してターンを終える。
 
 ## 2. 終わって起こされたら

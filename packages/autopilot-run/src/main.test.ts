@@ -1,41 +1,46 @@
 import { describe, expect, test } from "bun:test";
 import { parseStartOptions } from "./main.ts";
 
-const base = { impl: "claude", "max-rounds": "3", local: false };
+const base = { impl: "claude", reviewers: "agy", "max-rounds": "3", local: false };
 const onPath =
   (...names: string[]) =>
   async (n: string) =>
     names.includes(n);
 
 describe("parseStartOptions", () => {
-  test("レビュー担当の既定は、実装担当以外で PATH にあるもの全部", async () => {
-    const o = await parseStartOptions(base, onPath("claude", "agy", "copilot"));
-    expect(o.reviewers).toEqual([
-      { agent: "agy", models: [] },
-      { agent: "copilot", models: [] },
-    ]);
-    const o2 = await parseStartOptions({ ...base, impl: "agy" }, onPath("claude", "agy"));
-    expect(o2.reviewers).toEqual([{ agent: "claude", models: [] }]);
+  test("省略時は実装 agy・レビュー claude。PATH から担当を増やさない", async () => {
+    const o = await parseStartOptions(
+      { "max-rounds": "3", local: false },
+      onPath("claude", "agy", "codex"),
+    );
+    expect(o.impl).toBeUndefined();
+    expect(o.reviewers).toBeUndefined();
   });
 
-  test("models.yaml に定義があるエージェントだけを既定のレビュー担当にする", async () => {
-    const models = { agy: { high: [{ model: "m" }] } };
-    const o = await parseStartOptions(base, onPath("claude", "agy", "copilot"), models);
-    expect(o.reviewers).toEqual([{ agent: "agy", models: [] }]);
+  test("既定担当が PATH に無ければ別候補を選ばず拒否する", async () => {
+    await expect(
+      parseStartOptions({ "max-rounds": "3", local: false }, onPath("claude", "codex")),
+    ).rejects.toThrow(/CLI が PATH にない: agy/);
+    await expect(
+      parseStartOptions({ impl: "agy", "max-rounds": "3", local: false }, onPath("agy")),
+    ).rejects.toThrow(/CLI が PATH にない: claude/);
   });
 
-  test("レビュー担当がいなければ起動しない（レビュー無しで完了にしない）", async () => {
-    await expect(parseStartOptions(base, onPath("claude"))).rejects.toThrow(/レビュー担当がいない/);
+  test("設定の先頭担当を検証する。実装とレビューが同じ CLI でもよい", async () => {
+    const o = await parseStartOptions({ "max-rounds": "3", local: false }, onPath("codex"), {
+      roles: { impl: ["codex"], review: ["codex"] },
+    });
+    expect(o.impl).toBeUndefined();
   });
 
   test("--reviewers を明示したら PATH を見ない", async () => {
     const o = await parseStartOptions(
-      { ...base, reviewers: "agy:model-a/model-b,copilot" },
+      { ...base, reviewers: "agy:model-a/model-b,codex" },
       onPath(),
     );
     expect(o.reviewers).toEqual([
       { agent: "agy", models: [{ model: "model-a" }, { model: "model-b" }] },
-      { agent: "copilot", models: [] },
+      { agent: "codex", models: [] },
     ]);
   });
 
@@ -51,12 +56,12 @@ describe("parseStartOptions", () => {
   });
 
   test("知らないエージェントは拒否する", async () => {
-    await expect(parseStartOptions({ ...base, impl: "codex" }, onPath())).rejects.toThrow(
+    await expect(parseStartOptions({ ...base, impl: "copilot" }, onPath())).rejects.toThrow(
       /unknown/,
     );
-    await expect(parseStartOptions({ ...base, reviewers: "agy,codex" }, onPath())).rejects.toThrow(
-      /unknown/,
-    );
+    await expect(
+      parseStartOptions({ ...base, reviewers: "agy,copilot" }, onPath()),
+    ).rejects.toThrow(/unknown/);
   });
 
   test("--level の既定は high で、段階の名前だけ受け付ける", async () => {

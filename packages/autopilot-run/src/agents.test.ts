@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildArgv,
+  classifyFailure,
   formatAgentSpec,
   formatInvocation,
   parseAgentSpec,
@@ -22,6 +23,62 @@ describe("parseModelChoice", () => {
   });
 });
 
+describe("利用不能と通常の失敗を区別する", () => {
+  test("認証・利用枠・会話の上限だけが切り替え対象", () => {
+    for (const agent of ["claude", "agy", "codex"] as const) {
+      for (const stderr of [
+        "You've hit your usage limit",
+        "Rate limit exceeded",
+        "RESOURCE_EXHAUSTED",
+        "OAuth token has expired",
+        "Session expired",
+        "Conversation not found",
+        "context_length_exceeded",
+        "Prompt is too long",
+        "Not logged in. Please run login.",
+      ]) {
+        expect(classifyFailure(agent, { code: 1, stdout: "", stderr })).toBe("unavailable");
+      }
+      for (const stderr of [
+        "ECONNRESET",
+        "stream disconnected before completion",
+        "Internal server error",
+        "tests failed",
+        "unknown model",
+        "invalid argument",
+        "permission denied",
+      ]) {
+        expect(classifyFailure(agent, { code: 1, stdout: "", stderr })).toBe("error");
+      }
+      expect(
+        classifyFailure(agent, { code: 0, stdout: "Rate limit exceeded", stderr: "" }),
+      ).toBeNull();
+      expect(classifyFailure(agent, { code: 127, stdout: "", stderr: "Session expired" })).toBe(
+        "error",
+      );
+      expect(classifyFailure(agent, { code: 143, stdout: "", stderr: "Session expired" })).toBe(
+        "error",
+      );
+    }
+  });
+
+  test("Codex の失敗イベントを解釈し、ツール出力や本文中のエラー例には反応しない", () => {
+    const stdout = JSON.stringify({
+      type: "turn.failed",
+      error: { message: "You've hit your usage limit" },
+    });
+    expect(classifyFailure("codex", { code: 1, stdout, stderr: "" })).toBe("unavailable");
+    expect(classifyFailure("codex", { code: 0, stdout, stderr: "" })).toBe("unavailable");
+    const toolOutput = JSON.stringify({
+      type: "item.completed",
+      item: { type: "command_execution", aggregated_output: "Rate limit exceeded" },
+    });
+    expect(
+      classifyFailure("codex", { code: 1, stdout: toolOutput, stderr: "connection lost" }),
+    ).toBe("error");
+  });
+});
+
 describe("parseAgentSpec", () => {
   test("エージェントだけなら、モデルは models.yaml に任せる（空の並び）", () => {
     expect(parseAgentSpec(" claude ")).toEqual({ agent: "claude", models: [] });
@@ -36,11 +93,11 @@ describe("parseAgentSpec", () => {
   });
 
   test("モデル名に : を含んでもよい", () => {
-    expect(parseAgentSpec("copilot:a:b")).toEqual({ agent: "copilot", models: [{ model: "a:b" }] });
+    expect(parseAgentSpec("codex:a:b")).toEqual({ agent: "codex", models: [{ model: "a:b" }] });
   });
 
   test("知らないエージェントは拒否する", () => {
-    expect(() => parseAgentSpec("codex")).toThrow(/unknown agent/);
+    expect(() => parseAgentSpec("copilot")).toThrow(/unknown agent/);
     expect(() => parseAgentSpec("")).toThrow(/unknown agent/);
   });
 
@@ -72,19 +129,23 @@ describe("buildArgv", () => {
   });
 
   test("effort はエージェントごとのフラグで渡す", () => {
-    const flag = (agent: "claude" | "agy" | "copilot") => {
+    const flag = (agent: "claude" | "agy" | "codex") => {
       const argv = buildArgv({ agent, effort: "high" }, "P");
       return argv[argv.indexOf("high") - 1];
     };
     expect(flag("claude")).toBe("--effort");
     expect(flag("agy")).toBe("--effort");
-    expect(flag("copilot")).toBe("--reasoning-effort");
+    expect(buildArgv({ agent: "codex", effort: "high" }, "P")).toContain(
+      'model_reasoning_effort="high"',
+    );
     expect(buildArgv({ agent: "claude" }, "P")).not.toContain("--effort");
   });
 
   test("エージェントごとの権限確認の飛ばし方", () => {
     expect(buildArgv({ agent: "agy" }, "P")).toContain("--dangerously-skip-permissions");
-    expect(buildArgv({ agent: "copilot" }, "P")).toContain("--yolo");
+    expect(buildArgv({ agent: "codex" }, "P")).toContain(
+      "--dangerously-bypass-approvals-and-sandbox",
+    );
   });
 });
 
@@ -104,13 +165,20 @@ describe("会話の引き継ぎ", () => {
     expect(buildArgv({ agent: "agy" }, "P", resume).join(" ")).toContain("--conversation u1");
   });
 
-  test("copilot は --session-id で始め、--resume=ID で続ける", () => {
-    expect(buildArgv({ agent: "copilot" }, "P", start).join(" ")).toContain("--session-id u1");
-    expect(buildArgv({ agent: "copilot" }, "P", resume)).toContain("--resume=u1");
+  test("codex は exec で始め、exec resume ID で続ける", () => {
+    const first = buildArgv({ agent: "codex" }, "P", start);
+    expect(first.slice(0, 2)).toEqual(["codex", "exec"]);
+    expect(first).toContain("--json");
+    expect(first).not.toContain("u1");
+    const next = buildArgv({ agent: "codex", model: "m", effort: "high" }, "P", resume);
+    expect(next.slice(0, 3)).toEqual(["codex", "exec", "resume"]);
+    expect(next.slice(-3)).toEqual(["u1", "--", "P"]);
+    expect(next).toContain("--model");
+    expect(next).toContain('model_reasoning_effort="high"');
   });
 
   test("会話を渡しても -p の直後がプロンプト", () => {
-    for (const agent of ["claude", "agy", "copilot"] as const) {
+    for (const agent of ["claude", "agy"] as const) {
       for (const s of [start, resume]) {
         expect(buildArgv({ agent, model: "m" }, "P", s).slice(-2)).toEqual(["-p", "P"]);
       }
@@ -129,8 +197,34 @@ describe("会話の引き継ぎ", () => {
     expect(readSessionOutput("agy", start, empty)).toEqual({ session: null, text: "" });
   });
 
-  test("claude と copilot は渡した ID をそのまま使う", () => {
+  test("claude は渡した ID をそのまま使う", () => {
     expect(readSessionOutput("claude", start, "x")).toEqual({ session: "u1", text: "x" });
-    expect(readSessionOutput("copilot", resume, "x")).toEqual({ session: "u1", text: "x" });
+  });
+});
+
+describe("codex JSONL の読み取り", () => {
+  const start = { kind: "start", id: "unused" } as const;
+  test("会話 ID と最後のエージェント本文だけを取り出す", () => {
+    const out = [
+      { type: "thread.started", thread_id: "thread-1" },
+      { type: "item.completed", item: { type: "agent_message", text: "途中" } },
+      { type: "item.completed", item: { type: "command_execution", aggregated_output: "noise" } },
+      {
+        type: "item.completed",
+        item: { type: "agent_message", text: "判定: must なし\n確かめたこと" },
+      },
+      { type: "turn.completed", usage: {} },
+    ]
+      .map((e) => JSON.stringify(e))
+      .join("\n");
+    expect(readSessionOutput("codex", start, out)).toEqual({
+      session: "thread-1",
+      text: "判定: must なし\n確かめたこと",
+    });
+    expect(readSessionOutput("codex", undefined, out).text).toStartWith("判定:");
+  });
+  test("会話 ID の欠落や壊れた行で、架空の ID を返さない", () => {
+    expect(readSessionOutput("codex", start, "bad\n{}")).toEqual({ session: null, text: "" });
+    expect(readSessionOutput("codex", { kind: "resume", id: "old" }, "").session).toBe("old");
   });
 });

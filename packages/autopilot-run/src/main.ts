@@ -12,11 +12,10 @@ import { parseArgs } from "node:util";
 import {
   AGENTS,
   type AgentSpec,
-  buildArgv,
   formatAgentSpec,
   formatInvocation,
+  getAgentAdapter,
   parseAgentSpec,
-  readSessionOutput,
   type SessionRequest,
 } from "./agents.ts";
 import { capture, killAll, run } from "./exec.ts";
@@ -49,15 +48,15 @@ const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--
        autopilot-run stop
        autopilot-run models [--file PATH]
 
-  AGENT        ${AGENTS.join(" | ")}（既定: claude）。
+  AGENT        ${AGENTS.join(" | ")}（通常: 実装 agy、レビュー claude）。
                モデルは models.yaml の並びを使う。決め打ちするときは AGENT:MODEL@EFFORT/MODEL と書く（/ の順に試す）
-  --reviewers  レビュー担当（既定: 実装担当以外で PATH にあり、models.yaml に定義があるもの）
+  --reviewers  レビュー担当（省略時は models.yaml の roles.review の順）
   --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューは high、要約は light で固定
   --max-rounds 修正ループの上限（1〜10、既定: 3）
   --local      push・PR・CI を行わず、ローカルの差分だけで回す（試運転用）
   --from       どこから始めるか。${START_POINTS.join(" | ")}（既定: implement）。
                review は実装を飛ばし、今のブランチの PR（--local ならローカルの commit）のレビューから始める
-  models       段階ごとのモデルの並びを表示する。--file で別のファイルを検査する
+  models       担当と段階ごとのモデルの並びを表示する。--file で別のファイルを検査する
 
   models.yaml  $AUTOPILOT_MODELS（既定: ${MODELS_PATH}）。無ければ各 CLI の既定モデルで動く`;
 
@@ -76,8 +75,8 @@ function readModels(path: string): ModelTable | null {
 class UsageError extends Error {}
 
 export interface StartOptions {
-  impl: AgentSpec;
-  reviewers: AgentSpec[];
+  impl?: AgentSpec;
+  reviewers?: AgentSpec[];
   level: Level;
   maxRounds: number;
   local: boolean;
@@ -87,7 +86,7 @@ export interface StartOptions {
 /** 引数を読み、起動してよいかを確かめる。PATH の探索は findAgent に任せる。 */
 export async function parseStartOptions(
   values: {
-    impl: string;
+    impl?: string;
     reviewers?: string;
     level?: string;
     "max-rounds": string;
@@ -97,11 +96,11 @@ export async function parseStartOptions(
   findAgent: (name: string) => Promise<boolean>,
   models: ModelTable | null = null,
 ): Promise<StartOptions> {
-  let impl: AgentSpec;
-  let explicit: AgentSpec[] | null = null;
+  let impl: AgentSpec | undefined;
+  let reviewers: AgentSpec[] | undefined;
   try {
-    impl = parseAgentSpec(values.impl);
-    if (values.reviewers) explicit = values.reviewers.split(",").map(parseAgentSpec);
+    if (values.impl !== undefined) impl = parseAgentSpec(values.impl);
+    if (values.reviewers !== undefined) reviewers = values.reviewers.split(",").map(parseAgentSpec);
   } catch (e) {
     throw new UsageError(e instanceof Error ? e.message : String(e));
   }
@@ -121,26 +120,16 @@ export async function parseStartOptions(
     throw new UsageError(`--from は ${START_POINTS.join(" / ")} のどれか: ${values.from}`);
   }
 
-  let reviewers: AgentSpec[];
-  if (explicit) {
-    const names = explicit.map(formatAgentSpec);
-    if (new Set(names).size !== names.length) {
+  if (reviewers) {
+    const names = reviewers.map(formatAgentSpec);
+    if (new Set(names).size !== names.length)
       throw new UsageError(`--reviewers が重複している: ${names.join(",")}`);
-    }
-    reviewers = explicit;
-  } else {
-    reviewers = [];
-    for (const agent of AGENTS) {
-      if (agent === impl.agent) continue;
-      if (models && !models[agent]) continue;
-      if (await findAgent(agent)) reviewers.push({ agent, models: [] });
-    }
   }
-  if (reviewers.length === 0) {
-    const hint = models
-      ? `${impl.agent} 以外のエージェントを models.yaml に書き、PATH に入れる`
-      : `${impl.agent} 以外のエージェント CLI を PATH に入れる`;
-    throw new UsageError(`レビュー担当がいない。--reviewers で指定するか、${hint}`);
+  // CLI が無いことは利用上限ではない。既定の先頭候補が無ければ起動前に拒否する。
+  const roles = assignRoles({ impl, reviewers, level }, models ?? {});
+  for (const who of [...(impl ? [] : [roles.implement]), ...(reviewers ? [] : roles.reviewers)]) {
+    const agent = who.chain[0]!.agent;
+    if (!(await findAgent(agent))) throw new UsageError(`担当の CLI が PATH にない: ${agent}`);
   }
   return { impl, reviewers, level, maxRounds, local: values.local, from };
 }
@@ -150,7 +139,7 @@ async function main(argv: string[]): Promise<number> {
     args: argv,
     allowPositionals: true,
     options: {
-      impl: { type: "string", default: "claude" },
+      impl: { type: "string" },
       reviewers: { type: "string" },
       level: { type: "string" },
       "max-rounds": { type: "string", default: "3" },
@@ -273,11 +262,11 @@ async function start(
 ) {
   const logPath = state.file("run.log");
   const baseSha = await resolveBaseSha(root, base);
+  const roles = assignRoles(opts, models ?? {});
   state.log(
-    `start impl=${formatAgentSpec(opts.impl)} level=${opts.level} reviewers=${opts.reviewers.map(formatAgentSpec).join(",")} base=${baseSha.slice(0, 8)} from=${opts.from}${opts.local ? " (local)" : ""}`,
+    `start impl=${roles.implement.name} level=${opts.level} reviewers=${roles.reviewers.map((r) => r.name).join(",")} base=${baseSha.slice(0, 8)} from=${opts.from}${opts.local ? " (local)" : ""}`,
   );
   if (!models) state.log(`${modelsPath()} が無いので、各 CLI の既定モデルで動く`);
-  const roles = assignRoles(opts, models ?? {});
   const chain = (a: Assignee) => a.chain.map(formatInvocation).join(" → ");
   state.log(
     [
@@ -299,16 +288,22 @@ async function start(
           `-> ${formatInvocation(inv)}${req?.kind === "resume" ? ` (会話 ${req.id} の続き)` : ""}`,
         );
         // 会話を引き継ぐ実行は出力の形がエージェントごとに違うので、読んでから本文を run.log に書く。
-        const stdoutPath = output
-          ? state.file(output)
-          : req
-            ? state.file("agent-stdout.log")
-            : undefined;
-        const r = await run(buildArgv(inv, prompt, req), { cwd: root, logPath, stdoutPath });
-        if (!req) return { ok: r.code === 0, session: null };
-        const out = readSessionOutput(inv.agent, req, r.stdout);
+        const stdoutPath = state.file(output ? `agent-${output}.log` : "agent-stdout.log");
+        const adapter = getAgentAdapter(inv.agent);
+        const r = await run(adapter.buildArgv(inv, prompt, req), {
+          cwd: root,
+          logPath,
+          stdoutPath,
+        });
+        const out = adapter.readResult(r, req);
+        if (output) writeFileSync(state.file(output), out.text);
         if (out.text) appendFileSync(logPath, out.text.endsWith("\n") ? out.text : `${out.text}\n`);
-        return { ok: r.code === 0, session: out.session };
+        const failure = out.failure;
+        if (failure)
+          state.log(
+            `${formatInvocation(inv)}: ${failure === "unavailable" ? "利用不能" : "異常終了"} (exit ${r.code})`,
+          );
+        return { ok: failure === null, session: out.session, failure: failure ?? undefined };
       },
       head: () => headSha(root),
       fingerprint: () => worktreeFingerprint(root),
