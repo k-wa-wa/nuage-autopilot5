@@ -24,19 +24,59 @@ export function implement(mode: ShipMode): string {
 /** レビューの 1 行目。修正ループはこれを読んで、再レビューが要るかを決める。 */
 export const VERDICT = { must: "判定: must あり", none: "判定: must なし" } as const;
 
+export type ReviewPerspectiveSlug = "free" | "coverage";
+
+export interface ReviewPerspective {
+  readonly slug: ReviewPerspectiveSlug;
+  readonly name: string;
+}
+
+export const REVIEW_PERSPECTIVES: readonly ReviewPerspective[] = [
+  { slug: "free", name: "自由" },
+  { slug: "coverage", name: "網羅" },
+] as const;
+
 export interface ReviewInput {
   baseSha: string;
   /** 前回のレビューの時点の HEAD。2 周目以降だけ渡す。 */
   since: string | null;
 }
 
-export function review(input: ReviewInput): string {
+const COMMON_REVIEW_RULES = `重要度は次のとおり付ける。軽微な懸念や好み・改善点であっても、遠慮せず should や nit として積極的に挙げる（1 周目は should を直し、nit は要約で人間に渡すため）。
+- must: 仕様を満たさない・バグ・データや本番を壊す。直さずに出せないもの
+- should: 直した方がよいが、直さなくても仕様どおり動くもの
+- nit: 好みや体裁・より良い書き方の提案
+
+1 行目は「${VERDICT.must}」か「${VERDICT.none}」の文字列だけを書き、ほかの語は足さない。
+2 行目以降に、指摘を重要度付きの箇条書きで書く（「${VERDICT.none}」は must が 0 件という意味であり、should や nit があれば「指摘なし」とせず続けてすべて書く）。
+指摘の有無にかかわらず、最後に「確かめたこと:」として、各観点・仕様の各項目・テスト・影響範囲のどれをどう確かめたかを 2〜3 行で書く。`;
+
+export function review(
+  perspectiveOrInput: ReviewPerspectiveSlug | ReviewInput,
+  maybeInput?: ReviewInput,
+): string {
+  const perspective: ReviewPerspectiveSlug =
+    typeof perspectiveOrInput === "string" ? perspectiveOrInput : "coverage";
+  const input: ReviewInput =
+    typeof perspectiveOrInput === "string" ? maybeInput! : perspectiveOrInput;
+
   const since = input.since
     ? `\n前回のレビューの後の修正は \`git diff ${input.since}..HEAD\` である。ここを中心に、直っていないものと、修正で新たに壊れたものを見る。`
     : "";
-  return `あなたはコードレビュアーである。ファイルは一切変更しない。
+  const commonHeader = `あなたはコードレビュアーである。ファイルは一切変更しない。
+.autopilot/decisions.md があれば読む。そこで理由を付けて見送った指摘は、その理由が誤っている根拠を示せない限り繰り返さない。`;
+
+  if (perspective === "free") {
+    return `${commonHeader}
+\`git diff ${input.baseSha}...HEAD\` の変更と周辺コードを読み、.autopilot/brief.md の仕様に照らすだけでなく、「この変更がマージされたら何が壊れるか」を自分のやり方で疑って探す。差分を疑って読み、壊れるシナリオや盲点を積極的に探す。${since}
+
+観点の一覧は与えない。自分の経験と直感に従い、壊れるシナリオ・見落とし・想定外の副作用を自由に点検する。
+出力する前に、何が壊れうるかを洗い出す。
+${COMMON_REVIEW_RULES}`;
+  }
+
+  return `${commonHeader}
 \`git diff ${input.baseSha}...HEAD\` の変更と周辺コードを読み、.autopilot/brief.md の仕様に照らすだけでなく、差分を疑って読み、壊れるシナリオや盲点を積極的に探す。${since}
-.autopilot/decisions.md があれば読む。そこで理由を付けて見送った指摘は、その理由が誤っている根拠を示せない限り繰り返さない。
 
 次の観点をすべて点検する。
 - 仕様の充足: 解釈違い・見落とし・過剰な変更（頼まれていない変更）がないか
@@ -46,15 +86,8 @@ export function review(input: ReviewInput): string {
 - 既存機能への副作用・退行（Regression）: 既存の振る舞いや呼び出し元を壊していないか
 - テストの妥当性と十分性: 正常系のみのテストになっていないか、不十分なモックで欠陥を隠していないか
 
-重要度は次のとおり付ける。軽微な懸念や好み・改善点であっても、遠慮せず should や nit として積極的に挙げる（1 周目は should を直し、nit は要約で人間に渡すため）。
-- must: 仕様を満たさない・バグ・データや本番を壊す。直さずに出せないもの
-- should: 直した方がよいが、直さなくても仕様どおり動くもの
-- nit: 好みや体裁・より良い書き方の提案
-
 出力する前に上の全観点で指摘（must / should / nit）を洗い出す。
-1 行目は「${VERDICT.must}」か「${VERDICT.none}」の文字列だけを書き、ほかの語は足さない。
-2 行目以降に、指摘を重要度付きの箇条書きで書く（「${VERDICT.none}」は must が 0 件という意味であり、should や nit があれば「指摘なし」とせず続けてすべて書く）。
-指摘の有無にかかわらず、最後に「確かめたこと:」として、各観点・仕様の各項目・テスト・影響範囲のどれをどう確かめたかを 2〜3 行で書く。`;
+${COMMON_REVIEW_RULES}`;
 }
 
 /**
@@ -101,11 +134,20 @@ must を見送るときは、理由を .autopilot/decisions.md に書く。
 直すものが無ければ何も変更しない。変更しないことは失敗ではない。`;
 }
 
-export function summarize(baseSha: string, pr: number | null): string {
+export function summarize(
+  baseSha: string,
+  pr: number | null,
+  missingPerspectives: readonly string[] = [],
+): string {
+  const missing =
+    missingPerspectives.length > 0
+      ? `\n※全候補が失敗してレビューが欠けた観点: ${missingPerspectives.join(", ")}（欠けた旨を要約に明記すること）`
+      : "";
   return `${RULES}
 
 .autopilot/brief.md・decisions.md・review-*.md と \`git log ${baseSha}..HEAD\` を元に、人間向けの要約を .autopilot/result.md に書く。
-内容: 何をしたか / 主な判断とその理由 / 見送った指摘 / 人間の判断が必要なこと（無ければ「なし」）。短く。${
+内容: 何をしたか / 主な判断とその理由 / 見送った指摘 / 人間の判断が必要なこと（無ければ「なし」）。短く。
+レビュー結果について、観点ごとの担当（CLI・モデル）、観点ごとの must / should の件数、片方の観点しか挙げなかった must、欠けた観点があればその旨を書く。${missing}${
     pr ? `\nPR #${pr} の本文も同じ内容で gh pr edit --body により更新する。` : ""
   }`;
 }

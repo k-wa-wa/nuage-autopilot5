@@ -14,9 +14,9 @@ import { join } from "node:path";
 import type { AgentName, FailureKind, Invocation } from "../agents.ts";
 import type { CheckBucket, PrSnapshot } from "../ci.ts";
 import type { GitHub } from "../github.ts";
-import type { Assignee } from "../models.ts";
+import type { Assignee, ReviewerAssignee } from "../models.ts";
 import type { Config, Deps, SessionPlan } from "../pipeline.ts";
-import { VERDICT } from "../prompts.ts";
+import { REVIEW_PERSPECTIVES, VERDICT } from "../prompts.ts";
 
 /**
  * プロンプトの種類を見分ける目印。偽のエージェントはこれで自分の役割を知る。
@@ -128,9 +128,11 @@ export function pipelineHarness(opts: HarnessOptions) {
   const stages: string[] = [];
   const logs: string[] = [];
   const savedLogs: string[] = [];
-  let inbox = opts.inbox ?? false;
+  const inbox = opts.inbox ?? false;
+  let inboxTaken = false;
   const commits = [...opts.commits];
   const snapshots = [...(opts.github?.snapshots ?? [])];
+  const storedFiles = new Map<string, string>();
 
   const github: GitHub | null = opts.github
     ? {
@@ -178,13 +180,24 @@ export function pipelineHarness(opts: HarnessOptions) {
       rel: (n) => `.autopilot/${n}`,
       file: (n) => `/tmp/${n}`,
       read: (n) => {
+        const stored = storedFiles.get(n);
+        if (stored !== undefined) return stored;
         const m = n.match(/^review-(\d+)-(.+)\.md$/);
         if (!m) return null;
-        return (opts.review ?? (() => `${VERDICT.must}\n- must: 直す`))(Number(m[1]), m[2]!);
+        const initial = (opts.review ?? (() => `${VERDICT.must}\n- must: 直す`))(
+          Number(m[1]),
+          m[2]!,
+        );
+        storedFiles.set(n, initial);
+        return initial;
+      },
+      append: (n, text) => {
+        const cur = deps.state.read(n) ?? "";
+        storedFiles.set(n, cur + text);
       },
       takeInbox: (round) => {
-        if (!inbox) return null;
-        inbox = false;
+        if (!inbox || inboxTaken) return null;
+        inboxTaken = true;
         return `inbox-${round}.md`;
       },
     },
@@ -204,11 +217,18 @@ export function pipelineConfig(
   reviewers: Assignee[],
   extra: Partial<Config> = {},
 ): Config {
+  const reviewerAssignees: ReviewerAssignee[] = REVIEW_PERSPECTIVES.map((p, i) => {
+    const r = reviewers[i % reviewers.length]!;
+    return {
+      ...r,
+      perspective: r.perspective ?? p.slug,
+    };
+  });
   return {
     implement: impl,
     fix: impl,
     summarize: impl,
-    reviewers,
+    reviewers: reviewerAssignees,
     maxRounds: 3,
     baseSha: "sha0",
     from: "implement",
@@ -404,7 +424,10 @@ fail("fake gh: 未対応の呼び出し: " + args.join(" "));
 const MAIN = join(import.meta.dir, "..", "main.ts");
 
 /** 偽の claude / agy / codex / gh と本物の git だけを置いた bin を作る。 */
-export function fakeWorld(root: string, agents: readonly string[] = ["claude", "agy"]): FakeWorld {
+export function fakeWorld(
+  root: string,
+  agents: readonly string[] = ["claude", "agy", "codex"],
+): FakeWorld {
   const bin = join(root, "bin");
   const stateDir = join(root, "fake");
   mkdirSync(bin, { recursive: true });

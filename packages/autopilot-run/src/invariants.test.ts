@@ -158,11 +158,21 @@ describe("担当の切り替えの約束", () => {
   const roles = assignRoles({ level: "high" }, {});
   const cfg = { ...pipelineConfig(roles.implement, roles.reviewers), ...roles };
 
-  test("通常は実装 agy、レビュー claude。同じ CLI の独立したレビューも指定できる", () => {
+  test("通常は実装 agy、レビューは自由 claude・網羅 codex。同じ CLI の独立したレビューも指定できる", () => {
     expect(roles.implement.chain[0]!.agent).toBe("agy");
-    expect(roles.reviewers).toHaveLength(1);
+    expect(roles.reviewers).toHaveLength(2);
     expect(roles.reviewers[0]!.chain[0]!.agent).toBe("claude");
+    expect(roles.reviewers[1]!.chain[0]!.agent).toBe("codex");
     expect(AGENTS).toEqual(["claude", "agy", "codex"]);
+  });
+
+  test("レビューの性質は観点で持ち、エージェントの違いに頼らない", () => {
+    expect(prompts.REVIEW_PERSPECTIVES.map((p) => p.slug)).toEqual(["free", "coverage"]);
+    for (const p of prompts.REVIEW_PERSPECTIVES) {
+      const text = prompts.review(p.slug, { baseSha: "abc", since: null });
+      expect(text).toContain("あなたはコードレビュアーである。ファイルは一切変更しない");
+      expect(text).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
+    }
   });
 
   test("利用不能以外の失敗と変更途中の失敗では担当を切り替えない", async () => {

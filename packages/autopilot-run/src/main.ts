@@ -12,7 +12,6 @@ import { parseArgs } from "node:util";
 import {
   AGENTS,
   type AgentSpec,
-  formatAgentSpec,
   formatInvocation,
   getAgentAdapter,
   parseAgentSpec,
@@ -48,9 +47,9 @@ const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--
        autopilot-run stop
        autopilot-run models [--file PATH]
 
-  AGENT        ${AGENTS.join(" | ")}（通常: 実装 agy、レビュー claude）。
+  AGENT        ${AGENTS.join(" | ")}（通常: 実装 agy、レビューは自由 claude・網羅 codex）。
                モデルは models.yaml の並びを使う。決め打ちするときは AGENT:MODEL@EFFORT/MODEL と書く（/ の順に試す）
-  --reviewers  レビュー担当（省略時は models.yaml の roles.review の順）
+  --reviewers  レビュー担当（省略時は観点ごとに models.yaml の roles.review の順）
   --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューは high、要約は light で固定
   --max-rounds 修正ループの上限（1〜10、既定: 3）
   --local      push・PR・CI を行わず、ローカルの差分だけで回す（試運転用）
@@ -120,15 +119,14 @@ export async function parseStartOptions(
     throw new UsageError(`--from は ${START_POINTS.join(" / ")} のどれか: ${values.from}`);
   }
 
-  if (reviewers) {
-    const names = reviewers.map(formatAgentSpec);
-    if (new Set(names).size !== names.length)
-      throw new UsageError(`--reviewers が重複している: ${names.join(",")}`);
-  }
-  // CLI が無いことは利用上限ではない。既定の先頭候補が無ければ起動前に拒否する。
+  // CLI が無いことは利用上限ではない。各観点・実装の先頭候補が無ければ起動前に拒否する。
   const roles = assignRoles({ impl, reviewers, level }, models ?? {});
-  for (const who of [...(impl ? [] : [roles.implement]), ...(reviewers ? [] : roles.reviewers)]) {
-    const agent = who.chain[0]!.agent;
+  const toCheck = new Set<string>();
+  if (!impl) toCheck.add(roles.implement.chain[0]!.agent);
+  if (!reviewers) {
+    for (const r of roles.reviewers) toCheck.add(r.chain[0]!.agent);
+  }
+  for (const agent of toCheck) {
     if (!(await findAgent(agent))) throw new UsageError(`担当の CLI が PATH にない: ${agent}`);
   }
   return { impl, reviewers, level, maxRounds, local: values.local, from };
@@ -309,7 +307,15 @@ async function start(
       fingerprint: () => worktreeFingerprint(root),
       github: opts.local ? null : realGitHub(root),
       clock: { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) },
-      state,
+      state: {
+        stage: (s) => state.stage(s),
+        log: (m) => state.log(m),
+        rel: (n) => state.rel(n),
+        file: (n) => state.file(n),
+        read: (n) => state.read(n),
+        append: (n, t) => state.append(n, t),
+        takeInbox: (r) => state.takeInbox(r),
+      },
     },
   );
 }

@@ -212,6 +212,8 @@ describe("agy の既定モデルが利用上限に達し、レビュー担当が
     expect(o).toEqual({ kind: "done" });
     expect(h.calls.filter((c) => c.kind === "review").map((c) => c.inv.model)).toEqual([
       "exhausted",
+      "exhausted",
+      "available",
       "available",
     ]);
   });
@@ -282,7 +284,7 @@ describe("既存の PR のレビューから再開できなかった（nuage-clu
     );
     expect(o).toEqual({ kind: "done" });
     expect(h.calls.some((c) => c.kind === "implement")).toBe(false);
-    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(1);
+    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(2);
     expect(h.logs).toContain("PR #56");
   });
 
@@ -303,7 +305,7 @@ describe("must の無いラウンドでも修正が commit し続け、上限の
     });
     const o = await runPipeline(pipelineConfig(assignee("agy"), [assignee("claude")]), h.deps);
     expect(o).toEqual({ kind: "done" });
-    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(1);
+    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(2);
   });
 
   test("修正担当が見送った指摘を、レビュー担当が毎周繰り返した", () => {

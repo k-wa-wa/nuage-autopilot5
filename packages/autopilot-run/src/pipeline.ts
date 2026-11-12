@@ -74,6 +74,7 @@ export interface Deps {
     rel(name: string): string;
     file(name: string): string;
     read(name: string): string | null;
+    append(name: string, text: string): void;
     takeInbox(round: number): string | null;
   };
 }
@@ -83,14 +84,22 @@ export type Outcome =
   | { kind: "needs-human"; reason: string }
   | { kind: "failed"; reason: string };
 
+export interface ReviewOutcome {
+  files: string[];
+  missing: string[];
+}
+
 export function formatOutcome(o: Outcome): string {
   return o.kind === "done" ? "done" : `${o.kind}: ${o.reason}`;
 }
 
-/** レビュー結果のファイル名。同じエージェントをモデル違いで並べても衝突しない。 */
-export function reviewFileName(reviewer: Assignee, round: number): string {
-  const slug = reviewer.name.replace(/[^A-Za-z0-9._-]+/g, "-");
-  return `review-${round}-${slug}.md`;
+/** レビュー結果のファイル名。エージェント名ではなく観点で付ける。 */
+export function reviewFileName(
+  target: prompts.ReviewPerspectiveSlug | Assignee,
+  round: number,
+): string {
+  const slug = typeof target === "string" ? target : (target.perspective ?? target.name);
+  return `review-${round}-${slug.replace(/[^A-Za-z0-9._-]+/g, "-")}.md`;
 }
 
 /** 担当を、モデルの並びの前から順に試す。 */
@@ -188,13 +197,20 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
     d.state.log(`PR #${pr}`);
   }
 
-  const outcome = await rounds(cfg, d, runner, writer, mode, pr);
+  const missingPerspectives = new Set<string>();
+  const outcome = await rounds(cfg, d, runner, writer, mode, pr, missingPerspectives);
   if (outcome.kind === "failed") return outcome;
 
   d.state.stage("summarizing");
   // 要約はコードを書き換えない（result.md と PR 本文だけ）ので、何度試し直してもよい。
   if (
-    !(await runner.run(cfg.summarize, prompts.summarize(cfg.baseSha, pr), { writes: false })).ok
+    !(
+      await runner.run(
+        cfg.summarize,
+        prompts.summarize(cfg.baseSha, pr, Array.from(missingPerspectives)),
+        { writes: false },
+      )
+    ).ok
   ) {
     d.state.log("要約担当が異常終了した");
   }
@@ -208,6 +224,7 @@ async function rounds(
   writer: Writer,
   mode: prompts.ShipMode,
   pr: number | null,
+  missingPerspectives: Set<string>,
 ): Promise<Outcome> {
   /** 今の HEAD にレビューが要るか。must の無いレビューの後の修正は、CI だけ確かめる。 */
   let needsReview = true;
@@ -226,10 +243,18 @@ async function rounds(
     if (waiting.length > 0) d.state.stage(waiting.join(" + "));
 
     // レビューは CI の結果を使わないので、CI を待つ間に進める。
-    const [ci, reviews]: [CiVerdict | null, string[] | null] = await Promise.all([
-      github ? waitCi(d, github.gh, github.pr) : null,
-      needsReview ? review(cfg, d, runner, round, reviewedAt) : null,
-    ]);
+    const ciPromise: Promise<CiVerdict | null> = github
+      ? waitCi(d, github.gh, github.pr)
+      : Promise.resolve(null);
+    const reviewPromise: Promise<ReviewOutcome | null> = needsReview
+      ? review(cfg, d, runner, round, reviewedAt)
+      : Promise.resolve(null);
+    const [ci, reviewRes] = await Promise.all([ciPromise, reviewPromise]);
+
+    if (reviewRes) {
+      for (const m of reviewRes.missing) missingPerspectives.add(m);
+    }
+    const reviews = reviewRes ? reviewRes.files : null;
 
     let ciLog: string | null = null;
     if (github && ci) {
@@ -295,27 +320,37 @@ async function rounds(
   };
 }
 
-/** レビュー担当を全員並べて走らせ、書けたレビューのファイル名を返す。 */
+/** 観点ごとのレビュー担当を全員並べて走らせ、書けたレビューのファイル名を返す。 */
 async function review(
   cfg: Config,
   d: Deps,
   runner: Runner,
   round: number,
   since: string | null,
-): Promise<string[]> {
+): Promise<ReviewOutcome> {
   const results = await Promise.all(
     cfg.reviewers.map(async (rv) => {
+      const perspective = rv.perspective ?? "coverage";
       const name = reviewFileName(rv, round);
       // レビュー担当はファイルを書き換えないので、失敗したら常に次のモデルで試し直す。
-      const r = await runner.run(rv, prompts.review({ baseSha: cfg.baseSha, since }), {
+      const r = await runner.run(rv, prompts.review(perspective, { baseSha: cfg.baseSha, since }), {
         writes: false,
         output: name,
       });
-      if (!r.ok) d.state.log(`レビュー失敗: ${rv.name}`);
-      return r.ok ? name : null;
+      if (r.ok && r.invocation) {
+        const invStr = formatInvocation(r.invocation);
+        d.state.append(name, `\n担当: ${invStr}\n`);
+        d.state.log(`レビュー (${perspective}): ${invStr}`);
+        return { ok: true, name, perspective };
+      }
+      d.state.log(`レビュー失敗 (${perspective}): ${rv.name} の全候補が失敗した`);
+      return { ok: false, name, perspective };
     }),
   );
-  return results.filter((r): r is string => r !== null);
+  return {
+    files: results.filter((r) => r.ok).map((r) => r.name),
+    missing: results.filter((r) => !r.ok).map((r) => r.perspective),
+  };
 }
 
 /** CI の判定が出るまで待つ。判定そのものは judgeCi に任せる。 */

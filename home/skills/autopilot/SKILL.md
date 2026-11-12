@@ -14,7 +14,7 @@ description: 人間と合意した仕事を、裏で最後まで自走させる�
 
 1. `.autopilot/brief.md` を書く。実装担当はこの会話を知らないため、合意した仕様や受け入れ条件をこれだけで作業できるようにまとめる。
    - 目的 / 仕様と受け入れ条件 / 会話で決めたこと / 任せる判断（担当の裁量でよいこと）/ 関連 Issue・PR
-2. `autopilot-run` をシェルで起動する。通常の実装担当は agy、レビュー担当は claude。利用不能時の代替順はホストの models.yaml で決まる。特別な指示がない限り --impl と --reviewers は使わない。
+2. `autopilot-run` をシェルで起動する。通常の実装担当は agy。レビューは観点（自由・網羅）ごとに並列で走り、既定は自由 claude・網羅 codex。利用不能時の代替順はホストの models.yaml で決まる。特別な指示がない限り --impl と --reviewers は使わない。
    ```bash
    autopilot-run
    ```

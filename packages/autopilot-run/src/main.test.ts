@@ -44,10 +44,9 @@ describe("parseStartOptions", () => {
     ]);
   });
 
-  test("同じレビュー担当の重複は拒否する（同じファイルに書き合う）", async () => {
-    await expect(parseStartOptions({ ...base, reviewers: "agy,agy" }, onPath())).rejects.toThrow(
-      /重複/,
-    );
+  test("同じレビュー担当の重複も許容する（ファイル名は観点で決まるため）", async () => {
+    const o = await parseStartOptions({ ...base, reviewers: "agy,agy" }, onPath());
+    expect(o.reviewers).toHaveLength(2);
   });
 
   test("モデル違いの同じエージェントは並べてよい", async () => {
