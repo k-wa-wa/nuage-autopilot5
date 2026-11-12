@@ -113,7 +113,10 @@ describe("プロンプト", () => {
     expect(p).toContain("あなたはリポジトリのゲート検証担当である");
     expect(p).toContain("ファイルは一切変更しない");
     expect(p).toContain("ゲートの手順書の「守ること」（読み取り専用など）を最優先にする");
-    expect(p).toContain("作業ツリーを実行前の状態に戻す");
+    // ゲートは並列に走るので、作業ツリー全体を戻すと別のゲートのファイルを消す。
+    expect(p).toContain("自分が作ったファイル");
+    expect(p).toContain("作業ツリー全体を戻すコマンドは使わない");
+    expect(p).not.toContain("作業ツリーを実行前の状態に戻す");
     expect(p).toContain(prompts.GATE_VERDICT.pass);
     expect(p).toContain(prompts.GATE_VERDICT.fail);
     expect(p).toContain(prompts.GATE_VERDICT.skip);
