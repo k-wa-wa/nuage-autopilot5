@@ -8,6 +8,7 @@ import {
   loadModelTable,
   parseModelTable,
   resolveChain,
+  rotateReviewers,
 } from "./models.ts";
 import { tempDir } from "./testing/helpers.ts";
 
@@ -93,6 +94,24 @@ describe("resolveChain", () => {
   });
 });
 
+describe("rotateReviewers", () => {
+  test("空なら空", () => {
+    expect(rotateReviewers([], 0)).toEqual([]);
+  });
+
+  test("観点 i の担当は並びの i 番目から始め、残りは並びの順に並べる", () => {
+    const list = ["claude", "codex", "agy"] as const;
+    expect(rotateReviewers(list, 0)).toEqual(["claude", "codex", "agy"]);
+    expect(rotateReviewers(list, 1)).toEqual(["codex", "claude", "agy"]);
+    expect(rotateReviewers(list, 2)).toEqual(["agy", "claude", "codex"]);
+  });
+
+  test("並びが 1 つならどの観点もその担当", () => {
+    expect(rotateReviewers(["claude"], 0)).toEqual(["claude"]);
+    expect(rotateReviewers(["claude"], 1)).toEqual(["claude"]);
+  });
+});
+
 describe("assignRoles", () => {
   const table = parseModelTable(YAML);
   const roles = (level: "high" | "standard" | "light") =>
@@ -111,13 +130,15 @@ describe("assignRoles", () => {
   test("レビューは常に high、要約は常に light", () => {
     for (const level of ["high", "standard", "light"] as const) {
       expect(models(roles(level).reviewers[0]!)).toEqual(["model-x-high", "model-y-high"]);
+      expect(models(roles(level).reviewers[1]!)).toEqual(["model-x-high", "model-y-high"]);
       expect(models(roles(level).summarize)).toEqual(["model-small"]);
     }
   });
 
   test("担当の名前は指定のまま（ログとレビューのファイル名に使う）", () => {
     expect(roles("high").implement.name).toBe("claude");
-    expect(roles("high").reviewers.map((r) => r.name)).toEqual(["agy"]);
+    expect(roles("high").reviewers.map((r) => r.name)).toEqual(["agy", "agy"]);
+    expect(roles("high").reviewers.map((r) => r.perspective)).toEqual(["free", "coverage"]);
   });
 });
 
@@ -140,11 +161,14 @@ describe("formatModelTable", () => {
 });
 
 describe("担当の優先順", () => {
-  test("設定なしでは実装 agy → codex → claude、レビュー claude → codex → agy", () => {
+  test("設定なしでは実装 agy → codex → claude、レビューは自由 claude → codex → agy、網羅 codex → claude → agy", () => {
     const roles = assignRoles({ level: "high" }, {});
     expect(roles.implement.chain.map((i) => i.agent)).toEqual(["agy", "codex", "claude"]);
-    expect(roles.reviewers).toHaveLength(1);
+    expect(roles.reviewers).toHaveLength(2);
+    expect(roles.reviewers[0]!.perspective).toBe("free");
     expect(roles.reviewers[0]!.chain.map((i) => i.agent)).toEqual(["claude", "codex", "agy"]);
+    expect(roles.reviewers[1]!.perspective).toBe("coverage");
+    expect(roles.reviewers[1]!.chain.map((i) => i.agent)).toEqual(["codex", "claude", "agy"]);
     expect(roles.summarize.chain.map((i) => i.agent)).toEqual(["agy", "codex", "claude"]);
   });
 
@@ -160,17 +184,39 @@ describe("担当の優先順", () => {
       { agent: "agy", model: "model-y-high" },
     ]);
     expect(roles.reviewers[0]!.chain.map((i) => i.agent)).toEqual(["agy", "agy", "claude"]);
+    expect(roles.reviewers[1]!.chain.map((i) => i.agent)).toEqual(["claude", "agy", "agy"]);
     expect(roles.summarize.chain).toEqual([{ agent: "codex" }, { agent: "agy" }]);
     expect(formatModelTable(table)).toContain("impl     codex → agy");
   });
 
-  test("明示指定は設定の代替 CLI を追加しない", () => {
-    const roles = assignRoles(
+  test("設定の並びが 1 つなら両方の観点をその担当が見る", () => {
+    const table = parseModelTable("roles:\n  review: [claude]\n");
+    const roles = assignRoles({ level: "high" }, table);
+    expect(roles.reviewers).toHaveLength(2);
+    expect(roles.reviewers[0]!.chain.map((i) => i.agent)).toEqual(["claude"]);
+    expect(roles.reviewers[1]!.chain.map((i) => i.agent)).toEqual(["claude"]);
+  });
+
+  test("明示指定は設定の代替 CLI を追加せず、観点に循環して割り当てる", () => {
+    const one = assignRoles(
       { impl: parseAgentSpec("codex"), reviewers: [parseAgentSpec("codex")], level: "high" },
       {},
     );
-    expect(roles.implement.chain).toEqual([{ agent: "codex" }]);
-    expect(roles.reviewers[0]!.chain).toEqual([{ agent: "codex" }]);
+    expect(one.implement.chain).toEqual([{ agent: "codex" }]);
+    expect(one.reviewers).toHaveLength(2);
+    expect(one.reviewers[0]!.chain).toEqual([{ agent: "codex" }]);
+    expect(one.reviewers[1]!.chain).toEqual([{ agent: "codex" }]);
+
+    const two = assignRoles(
+      {
+        impl: parseAgentSpec("codex"),
+        reviewers: [parseAgentSpec("claude"), parseAgentSpec("agy")],
+        level: "high",
+      },
+      {},
+    );
+    expect(two.reviewers[0]!.name).toBe("claude");
+    expect(two.reviewers[1]!.name).toBe("agy");
   });
 
   test("担当の誤記・空・重複・Copilot は起動前に拒否する", () => {

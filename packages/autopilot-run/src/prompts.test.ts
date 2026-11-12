@@ -4,11 +4,12 @@ import { kindOf, MARKERS } from "./testing/helpers.ts";
 
 const all = {
   implement: prompts.implement("pr"),
-  review: prompts.review({ baseSha: "abc123", since: null }),
+  reviewFree: prompts.review("free", { baseSha: "abc123", since: null }),
+  reviewCoverage: prompts.review("coverage", { baseSha: "abc123", since: null }),
   fix: prompts.fix({
     mode: "pr",
     scope: "must-should",
-    reviews: [".autopilot/review-1-agy.md"],
+    reviews: [".autopilot/review-1-free.md", ".autopilot/review-1-coverage.md"],
     ciLog: null,
     inbox: null,
   }),
@@ -18,7 +19,8 @@ const all = {
 describe("プロンプト", () => {
   test("種類ごとの目印がちょうど 1 つ入っている（偽のエージェントが役割を見分ける）", () => {
     for (const [kind, prompt] of Object.entries(all)) {
-      expect(kindOf(prompt)).toBe(kind as keyof typeof MARKERS);
+      const expectedKind = kind.startsWith("review") ? "review" : (kind as keyof typeof MARKERS);
+      expect(kindOf(prompt)).toBe(expectedKind);
       const hits = Object.values(MARKERS).filter((m) => prompt.includes(m));
       expect(hits).toHaveLength(1);
     }
@@ -40,46 +42,30 @@ describe("プロンプト", () => {
     }
   });
 
-  test("レビューは基点からの差分を読ませ、ファイルを変えさせない", () => {
-    expect(all.review).toContain("git diff abc123...HEAD");
-    expect(all.review).toContain("ファイルは一切変更しない");
-    expect(all.review).toContain("判定: must なし");
+  test("2 観点のレビュープロンプトは共通の約束を含む（差分読解・ファイル非変更・1行目判定・確かめたこと・decisions.md）", () => {
+    for (const p of [all.reviewFree, all.reviewCoverage]) {
+      expect(p).toContain("git diff abc123...HEAD");
+      expect(p).toContain("ファイルは一切変更しない");
+      expect(p).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
+      expect(p).toContain("ほかの語は足さない");
+      expect(p).toContain("must: 仕様を満たさない");
+      expect(p).toContain("should や nit として積極的に挙げる");
+      expect(p).toContain("指摘の有無にかかわらず");
+      expect(p).toContain("確かめたこと:");
+      expect(p).toContain(".autopilot/decisions.md");
+      expect(p).toContain("繰り返さない");
+    }
   });
 
-  test("レビューは指摘が無くても、何を確かめたかを書かせる（浅いレビューを見分ける）", () => {
-    expect(all.review).toContain("指摘の有無にかかわらず");
-    expect(all.review).toContain("確かめたこと:");
-    expect(all.review).not.toContain("とだけ出力する");
+  test("自由レビューは観点一覧を与えず壊れるシナリオを探させる", () => {
+    expect(all.reviewFree).toContain("この変更がマージされたら何が壊れるか");
+    expect(all.reviewFree).toContain("観点の一覧は与えない");
+    expect(all.reviewFree).not.toContain("仕様の充足");
+    expect(all.reviewFree).not.toContain("エッジケース・境界値・異常系");
   });
 
-  test("修正には、渡されたものだけを並べる（優先度つき）", () => {
-    const p = prompts.fix({
-      mode: "pr",
-      scope: "must-should",
-      reviews: [".autopilot/review-1-agy.md", ".autopilot/review-1-codex.md"],
-      ciLog: ".autopilot/ci-fail-1.log",
-      inbox: ".autopilot/inbox-1.md",
-    });
-    expect(p).toContain("人間からの追加指示: .autopilot/inbox-1.md（最優先）");
-    expect(p).toContain("CI の失敗ログ: .autopilot/ci-fail-1.log（必ず直す）");
-    expect(p).toContain(".autopilot/review-1-agy.md, .autopilot/review-1-codex.md");
-    expect(all.fix).not.toContain("追加指示");
-    expect(all.fix).not.toContain("CI の失敗ログ");
-  });
-
-  test("要約は PR があるときだけ PR 本文も更新させる", () => {
-    expect(prompts.summarize("abc", 7)).toContain("PR #7 の本文");
-    expect(prompts.summarize("abc", null)).not.toContain("PR #");
-  });
-
-  test("レビューは 1 行目に must の有無だけを書かせ、重要度の基準を示す", () => {
-    expect(all.review).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
-    expect(all.review).toContain("ほかの語は足さない");
-    expect(all.review).toContain("must: 仕様を満たさない");
-  });
-
-  test("レビューは差分を疑って読み、具体的な批判的観点をすべて点検させる", () => {
-    expect(all.review).toContain("差分を疑って読み、壊れるシナリオや盲点を積極的に探す");
+  test("網羅レビューは具体的な批判的観点（6 観点チェックリスト）をすべて点検させる", () => {
+    expect(all.reviewCoverage).toContain("差分を疑って読み、壊れるシナリオや盲点を積極的に探す");
     for (const aspect of [
       "仕様の充足",
       "過剰な変更（頼まれていない変更）",
@@ -90,24 +76,45 @@ describe("プロンプト", () => {
       "副作用・退行（Regression）",
       "テストの妥当性と十分性",
     ]) {
-      expect(all.review).toContain(aspect);
+      expect(all.reviewCoverage).toContain(aspect);
     }
   });
 
-  test("レビューは軽微な懸念や改善点も should や nit として積極的に挙げさせる", () => {
-    expect(all.review).toContain("should や nit として積極的に挙げる");
+  test("修正には、渡されたものだけを並べる（優先度つき）", () => {
+    const p = prompts.fix({
+      mode: "pr",
+      scope: "must-should",
+      reviews: [".autopilot/review-1-free.md", ".autopilot/review-1-coverage.md"],
+      ciLog: ".autopilot/ci-fail-1.log",
+      inbox: ".autopilot/inbox-1.md",
+    });
+    expect(p).toContain("人間からの追加指示: .autopilot/inbox-1.md（最優先）");
+    expect(p).toContain("CI の失敗ログ: .autopilot/ci-fail-1.log（必ず直す）");
+    expect(p).toContain(".autopilot/review-1-free.md, .autopilot/review-1-coverage.md");
+    expect(all.fix).not.toContain("追加指示");
+    expect(all.fix).not.toContain("CI の失敗ログ");
   });
 
-  test("レビューは decisions.md の見送りを繰り返させない", () => {
-    expect(all.review).toContain(".autopilot/decisions.md");
-    expect(all.review).toContain("繰り返さない");
+  test("要約は PR があるときだけ PR 本文も更新させ、観点ごとの担当・件数・欠けた観点を書かせる", () => {
+    expect(prompts.summarize("abc", 7)).toContain("PR #7 の本文");
+    expect(prompts.summarize("abc", null)).not.toContain("PR #");
+    expect(all.summarize).toContain("観点ごとの担当（CLI・モデル）");
+    expect(all.summarize).toContain("観点ごとの must / should の件数");
+    expect(all.summarize).toContain("片方の観点しか挙げなかった must");
+    expect(all.summarize).toContain("欠けた観点があればその旨を書く");
+
+    const withMissing = prompts.summarize("abc", null, ["free"]);
+    expect(withMissing).toContain("全候補が失敗してレビューが欠けた観点: free");
   });
 
   test("2 周目以降のレビューは、前回レビューした HEAD からの修正を示す", () => {
-    const p = prompts.review({ baseSha: "abc", since: "def" });
-    expect(p).toContain("git diff abc...HEAD");
-    expect(p).toContain("git diff def..HEAD");
-    expect(all.review).not.toContain("前回のレビュー");
+    for (const perspective of ["free", "coverage"] as const) {
+      const p = prompts.review(perspective, { baseSha: "abc", since: "def" });
+      expect(p).toContain("git diff abc...HEAD");
+      expect(p).toContain("git diff def..HEAD");
+    }
+    expect(all.reviewFree).not.toContain("前回のレビューの後の修正");
+    expect(all.reviewCoverage).not.toContain("前回のレビューの後の修正");
   });
 
   test("修正の範囲: 1 周目は should まで、2 周目以降は must だけ。nit は直させない", () => {

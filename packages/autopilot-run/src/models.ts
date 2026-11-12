@@ -9,6 +9,7 @@ import {
   type ModelChoice,
   parseModelChoice,
 } from "./agents.ts";
+import { REVIEW_PERSPECTIVES, type ReviewPerspectiveSlug } from "./prompts.ts";
 
 /**
  * どの作業を、どのくらいの賢さで行うか。
@@ -125,11 +126,24 @@ export interface Assignee {
   chain: Invocation[];
 }
 
+export interface ReviewerAssignee extends Assignee {
+  perspective: ReviewPerspectiveSlug;
+}
+
 export interface Assignment {
   implement: Assignee;
   fix: Assignee;
   summarize: Assignee;
-  reviewers: Assignee[];
+  reviewers: ReviewerAssignee[];
+}
+
+/** 観点ごとに試す担当の並びを決める。i 番目から始め、残りは並びの順に試す。 */
+export function rotateReviewers(agents: readonly AgentName[], index: number): AgentName[] {
+  if (agents.length === 0) return [];
+  const start = index % agents.length;
+  const first = agents[start]!;
+  const rest = agents.filter((_, idx) => idx !== start);
+  return [first, ...rest];
 }
 
 /** 作業ごとに、誰がどのモデルの並びで行うかを決める。 */
@@ -149,15 +163,38 @@ export function assignRoles(
     };
   };
   const implement = opts.impl ? as(opts.impl, opts.level) : configured("impl", opts.level);
+
+  let reviewers: ReviewerAssignee[];
+  if (opts.reviewers && opts.reviewers.length > 0) {
+    reviewers = REVIEW_PERSPECTIVES.map((p, i) => {
+      const spec = opts.reviewers![i % opts.reviewers!.length]!;
+      return {
+        name: formatAgentSpec(spec),
+        perspective: p.slug,
+        chain: resolveChain(spec, FIXED_LEVELS.review, table),
+      };
+    });
+  } else {
+    const configuredAgents = table.roles?.review ?? DEFAULT_ROLES.review;
+    reviewers = REVIEW_PERSPECTIVES.map((p, i) => {
+      const order = rotateReviewers(configuredAgents, i);
+      return {
+        name: order[0]!,
+        perspective: p.slug,
+        chain: order.flatMap((agent) =>
+          resolveChain({ agent, models: [] }, FIXED_LEVELS.review, table),
+        ),
+      };
+    });
+  }
+
   return {
     implement,
     fix: implement,
     summarize: opts.impl
       ? as(opts.impl, FIXED_LEVELS.summarize)
       : configured("impl", FIXED_LEVELS.summarize),
-    reviewers: opts.reviewers
-      ? opts.reviewers.map((r) => as(r, FIXED_LEVELS.review))
-      : [configured("review", FIXED_LEVELS.review)],
+    reviewers,
   };
 }
 

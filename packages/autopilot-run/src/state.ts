@@ -61,6 +61,10 @@ export class State {
     return existsSync(path) ? readFileSync(path, "utf8") : null;
   }
 
+  append(name: string, text: string): void {
+    appendFileSync(this.file(name), text);
+  }
+
   /** 追加指示があれば round 用に退避し、その名前を返す。 */
   takeInbox(round: number): string | null {
     const path = this.file("inbox.md");

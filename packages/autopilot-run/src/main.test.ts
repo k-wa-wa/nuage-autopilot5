@@ -8,7 +8,7 @@ const onPath =
     names.includes(n);
 
 describe("parseStartOptions", () => {
-  test("省略時は実装 agy・レビュー claude。PATH から担当を増やさない", async () => {
+  test("省略時は実装 agy・レビューは自由 claude・網羅 codex。PATH から担当を増やさない", async () => {
     const o = await parseStartOptions(
       { "max-rounds": "3", local: false },
       onPath("claude", "agy", "codex"),
@@ -24,6 +24,9 @@ describe("parseStartOptions", () => {
     await expect(
       parseStartOptions({ impl: "agy", "max-rounds": "3", local: false }, onPath("agy")),
     ).rejects.toThrow(/CLI が PATH にない: claude/);
+    await expect(
+      parseStartOptions({ "max-rounds": "3", local: false }, onPath("agy", "claude")),
+    ).rejects.toThrow(/CLI が PATH にない: codex/);
   });
 
   test("設定の先頭担当を検証する。実装とレビューが同じ CLI でもよい", async () => {
@@ -44,10 +47,15 @@ describe("parseStartOptions", () => {
     ]);
   });
 
-  test("同じレビュー担当の重複は拒否する（同じファイルに書き合う）", async () => {
-    await expect(parseStartOptions({ ...base, reviewers: "agy,agy" }, onPath())).rejects.toThrow(
-      /重複/,
-    );
+  test("同じレビュー担当の重複も許容する（ファイル名は観点で決まるため）", async () => {
+    const o = await parseStartOptions({ ...base, reviewers: "agy,agy" }, onPath());
+    expect(o.reviewers).toHaveLength(2);
+  });
+
+  test("観点数を超えるレビュー担当は拒否する", async () => {
+    await expect(
+      parseStartOptions({ ...base, reviewers: "agy,claude,codex" }, onPath()),
+    ).rejects.toThrow(/--reviewers は観点の数（2）以下で指定すること/);
   });
 
   test("モデル違いの同じエージェントは並べてよい", async () => {
