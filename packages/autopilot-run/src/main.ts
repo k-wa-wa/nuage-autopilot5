@@ -12,12 +12,10 @@ import { parseArgs } from "node:util";
 import {
   AGENTS,
   type AgentSpec,
-  buildArgv,
-  classifyFailure,
   formatAgentSpec,
   formatInvocation,
+  getAgentAdapter,
   parseAgentSpec,
-  readSessionOutput,
   type SessionRequest,
 } from "./agents.ts";
 import { capture, killAll, run } from "./exec.ts";
@@ -291,11 +289,16 @@ async function start(
         );
         // 会話を引き継ぐ実行は出力の形がエージェントごとに違うので、読んでから本文を run.log に書く。
         const stdoutPath = state.file(output ? `agent-${output}.log` : "agent-stdout.log");
-        const r = await run(buildArgv(inv, prompt, req), { cwd: root, logPath, stdoutPath });
-        const out = readSessionOutput(inv.agent, req, r.stdout);
+        const adapter = getAgentAdapter(inv.agent);
+        const r = await run(adapter.buildArgv(inv, prompt, req), {
+          cwd: root,
+          logPath,
+          stdoutPath,
+        });
+        const out = adapter.readResult(r, req);
         if (output) writeFileSync(state.file(output), out.text);
         if (out.text) appendFileSync(logPath, out.text.endsWith("\n") ? out.text : `${out.text}\n`);
-        const failure = classifyFailure(inv.agent, r);
+        const failure = out.failure;
         if (failure)
           state.log(
             `${formatInvocation(inv)}: ${failure === "unavailable" ? "利用不能" : "異常終了"} (exit ${r.code})`,

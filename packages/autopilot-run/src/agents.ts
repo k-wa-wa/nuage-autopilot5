@@ -72,27 +72,108 @@ export function formatInvocation(inv: Invocation): string {
  */
 export type SessionRequest = { kind: "start"; id: string } | { kind: "resume"; id: string };
 
-function sessionArgs(agent: AgentName, s: SessionRequest | undefined): string[] {
-  if (!s) return [];
-  switch (agent) {
-    case "claude":
-      return s.kind === "start" ? ["--session-id", s.id] : ["--resume", s.id];
-    case "agy":
-      // 会話 ID は JSON の出力にしか出ない。
-      return [...(s.kind === "resume" ? ["--conversation", s.id] : []), "--output-format", "json"];
-    case "codex":
-      return s.kind === "resume" ? [s.id] : [];
-  }
+export type FailureKind = "unavailable" | "error";
+
+export interface AgentProcessResult {
+  code: number;
+  stdout: string;
+  stderr: string;
 }
 
-/** 会話を引き継いだ実行の標準出力から、会話 ID と本文を読む。ID が読めなければ session は null。 */
-export function readSessionOutput(
-  agent: AgentName,
-  s: SessionRequest | undefined,
-  stdout: string,
-): { session: string | null; text: string } {
-  if (agent === "codex") {
-    const events = jsonEvents(stdout);
+export interface AgentResult {
+  session: string | null;
+  text: string;
+  failure: FailureKind | null;
+}
+
+/** CLI ごとのコマンドと出力形式を、共通の呼び出し方に変換する。 */
+export interface AgentAdapter {
+  buildArgv(choice: ModelChoice, prompt: string, session?: SessionRequest): string[];
+  readResult(result: AgentProcessResult, session?: SessionRequest): AgentResult;
+}
+
+/** 診断に使える出力は CLI が選ぶ。本文と構造化エラーを混ぜない。 */
+interface DecodedOutput {
+  session: string | null;
+  text: string;
+  errors: string[];
+  diagnosticText: string;
+  failed?: boolean;
+}
+
+const claude: AgentAdapter = {
+  buildArgv(choice, prompt, session) {
+    const conversation = !session
+      ? []
+      : session.kind === "start"
+        ? ["--session-id", session.id]
+        : ["--resume", session.id];
+    return printArgv("claude", choice, prompt, conversation);
+  },
+  readResult(result, session) {
+    return interpretResult(result, {
+      session: session?.id ?? null,
+      text: result.stdout,
+      errors: [],
+      diagnosticText: result.stdout,
+    });
+  },
+};
+
+const agy: AgentAdapter = {
+  buildArgv(choice, prompt, session) {
+    const conversation = session
+      ? [
+          ...(session.kind === "resume" ? ["--conversation", session.id] : []),
+          "--output-format",
+          "json",
+        ]
+      : [];
+    return printArgv("agy", choice, prompt, conversation);
+  },
+  readResult(result, session) {
+    let conversation: string | null = null;
+    let text = result.stdout;
+    if (session) {
+      try {
+        const out: unknown = JSON.parse(result.stdout);
+        if (isRecord(out)) {
+          conversation =
+            typeof out.conversation_id === "string" ? out.conversation_id || null : null;
+          if (typeof out.response === "string") text = out.response;
+        }
+      } catch {
+        // JSON を読めなければ、本文は生の出力を残し、会話 ID は null にする。
+      }
+    }
+    const events = jsonEvents(result.stdout);
+    return interpretResult(result, {
+      session: conversation,
+      text,
+      errors: events.map(errorMessage),
+      diagnosticText: events.length > 0 ? "" : result.stdout,
+    });
+  },
+};
+
+const codex: AgentAdapter = {
+  buildArgv(choice, prompt, session) {
+    return [
+      "codex",
+      "exec",
+      ...(session?.kind === "resume" ? ["resume"] : []),
+      ...modelArgs(choice),
+      ...(choice.effort ? ["-c", `model_reasoning_effort=${JSON.stringify(choice.effort)}`] : []),
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--json",
+      ...(session?.kind === "resume" ? [session.id] : []),
+      // オプションに見えるプロンプトも位置引数として渡す。
+      "--",
+      prompt,
+    ];
+  },
+  readResult(result, session) {
+    const events = jsonEvents(result.stdout);
     const thread = events.find((e) => e.type === "thread.started");
     const messages = events.flatMap((e) => {
       const item = e.item;
@@ -103,45 +184,64 @@ export function readSessionOutput(
         ? [item.text]
         : [];
     });
-    return {
+    const errors = events.filter((e) => e.type === "turn.failed" || e.type === "error");
+    return interpretResult(result, {
       session:
         typeof thread?.thread_id === "string"
           ? thread.thread_id
-          : s?.kind === "resume"
-            ? s.id
+          : session?.kind === "resume"
+            ? session.id
             : null,
       text: messages.at(-1) ?? "",
-    };
-  }
-  if (agent !== "agy" || !s) return { session: s?.id ?? null, text: stdout };
-  try {
-    const out: unknown = JSON.parse(stdout);
-    const field = (k: string) => (isRecord(out) && typeof out[k] === "string" ? out[k] : null);
-    return { session: field("conversation_id") || null, text: field("response") ?? stdout };
-  } catch {
-    return { session: null, text: stdout };
-  }
+      errors: errors.map(errorMessage),
+      diagnosticText: "",
+      failed: errors.some((e) => e.type === "turn.failed"),
+    });
+  },
+};
+
+const ADAPTERS = { claude, agy, codex } satisfies Record<AgentName, AgentAdapter>;
+
+export function getAgentAdapter(agent: AgentName): AgentAdapter {
+  return ADAPTERS[agent];
 }
 
-export type FailureKind = "unavailable" | "error";
+/** CLI の権限確認・モデル・effort・プロンプトの配置を共有する。 */
+function printArgv(
+  command: "claude" | "agy",
+  choice: ModelChoice,
+  prompt: string,
+  conversation: string[],
+): string[] {
+  return [
+    command,
+    ...modelArgs(choice),
+    ...conversation,
+    ...(choice.effort ? ["--effort", choice.effort] : []),
+    "--dangerously-skip-permissions",
+    // agy の -p は直後の引数をプロンプトとして読むので、必ず末尾に置く。
+    "-p",
+    prompt,
+  ];
+}
 
-/** CLI 自体の利用不能だけを切り替え対象にする。通常の失敗や通信障害は対象外。 */
-export function classifyFailure(
-  agent: AgentName,
-  result: { code: number; stdout: string; stderr: string },
-): FailureKind | null {
-  const errors =
-    agent === "codex"
-      ? jsonEvents(result.stdout).filter((e) => e.type === "turn.failed" || e.type === "error")
-      : [];
-  if (result.code === 0 && !errors.some((e) => e.type === "turn.failed")) return null;
-  // 終了シグナル・CLI 未導入は、出力の内容にかかわらず停止する。
-  if (result.code === 127 || result.code >= 128) return "error";
-  // 通常の応答本文中に書かれたエラー例を、CLI の診断と取り違えない。
-  const events = agent === "agy" ? jsonEvents(result.stdout) : [];
-  const structured = agent === "codex" ? errors : events;
-  const trusted = [result.stderr, ...structured.map((e) => errorMessage(e))].join("\n");
-  const stdout = agent === "codex" || events.length > 0 ? "" : result.stdout;
+function modelArgs(choice: ModelChoice): string[] {
+  return choice.model ? ["--model", choice.model] : [];
+}
+
+function interpretResult(result: AgentProcessResult, output: DecodedOutput): AgentResult {
+  let failure: FailureKind | null = null;
+  if (result.code !== 0 || output.failed) {
+    failure =
+      result.code === 127 || result.code >= 128
+        ? "error"
+        : classifyDiagnostics([result.stderr, ...output.errors].join("\n"), output.diagnosticText);
+  }
+  return { session: output.session, text: output.text, failure };
+}
+
+/** CLI が抽出した診断から利用不能だけを識別する。エージェント名・会話の形式は知らない。 */
+function classifyDiagnostics(trusted: string, stdout: string): FailureKind {
   // 機械的なコードはログの接頭辞があっても拾う。通常の stdout 本文には適用しない。
   if (
     /\b(?:rate_limit_exceeded|usage_limit_reached|insufficient_quota|resource_?exhausted|context_length_exceeded|context_window_exceeded)\b/i.test(
@@ -199,49 +299,22 @@ function jsonEvents(stdout: string): Record<string, unknown>[] {
   });
 }
 
-/**
- * 非対話で 1 ターン実行するコマンド。
- * 人間は不在なので、どのエージェントも権限確認を飛ばす。
- */
+/** 非対話で 1 ターン実行するコマンド。 */
 export function buildArgv(inv: Invocation, prompt: string, session?: SessionRequest): string[] {
-  const model = inv.model ? ["--model", inv.model] : [];
-  const conversation = sessionArgs(inv.agent, session);
-  const effort = (flag: string) => (inv.effort ? [flag, inv.effort] : []);
-  switch (inv.agent) {
-    case "claude":
-      return [
-        "claude",
-        ...model,
-        ...conversation,
-        ...effort("--effort"),
-        "--dangerously-skip-permissions",
-        "-p",
-        prompt,
-      ];
-    case "agy":
-      // agy の -p は直後の引数をプロンプトとして読むので、必ず末尾に置く。
-      return [
-        "agy",
-        ...model,
-        ...conversation,
-        ...effort("--effort"),
-        "--dangerously-skip-permissions",
-        "-p",
-        prompt,
-      ];
-    case "codex":
-      return [
-        "codex",
-        "exec",
-        ...(session?.kind === "resume" ? ["resume"] : []),
-        ...model,
-        ...(inv.effort ? ["-c", `model_reasoning_effort=${JSON.stringify(inv.effort)}`] : []),
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--json",
-        ...conversation,
-        // オプションに見えるプロンプトも位置引数として渡す。
-        "--",
-        prompt,
-      ];
-  }
+  return getAgentAdapter(inv.agent).buildArgv(inv, prompt, session);
+}
+
+/** 会話 ID と本文の読み取り。CLI の出力を確認する場合に使う。 */
+export function readSessionOutput(
+  agent: AgentName,
+  session: SessionRequest | undefined,
+  stdout: string,
+): { session: string | null; text: string } {
+  const out = getAgentAdapter(agent).readResult({ code: 0, stdout, stderr: "" }, session);
+  return { session: out.session, text: out.text };
+}
+
+/** CLI の終了結果から、通常の失敗と利用不能を区別する。 */
+export function classifyFailure(agent: AgentName, result: AgentProcessResult): FailureKind | null {
+  return getAgentAdapter(agent).readResult(result).failure;
 }
