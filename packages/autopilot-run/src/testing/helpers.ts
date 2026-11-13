@@ -13,10 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentName, FailureKind, Invocation } from "../agents.ts";
 import type { CheckBucket, PrSnapshot } from "../ci.ts";
-import type { GitHub } from "../github.ts";
+import type { GateFile, GitHub } from "../github.ts";
 import type { Assignee, ReviewerAssignee } from "../models.ts";
 import type { Config, Deps, SessionPlan } from "../pipeline.ts";
-import { REVIEW_PERSPECTIVES, VERDICT } from "../prompts.ts";
+import { GATE_VERDICT, REVIEW_PERSPECTIVES, VERDICT } from "../prompts.ts";
 
 /**
  * プロンプトの種類を見分ける目印。偽のエージェントはこれで自分の役割を知る。
@@ -26,6 +26,7 @@ export const MARKERS = {
   implement: "brief.md の仕様を実装",
   review: "あなたはコードレビュアー",
   fix: "直すべきもの",
+  gate: "リポジトリのゲート検証担当",
   summarize: "要約を .autopilot/result.md に書く",
 } as const;
 export type PromptKind = keyof typeof MARKERS;
@@ -104,8 +105,16 @@ export interface HarnessOptions {
   failAgent?: (inv: Invocation, kind: PromptKind) => boolean;
   /** 失敗する前に作業ツリーを書き換えるか（途中まで書いて落ちた担当）。 */
   dirtyOnFail?: (inv: Invocation, kind: PromptKind) => boolean;
+  /** 成功しても commit せずに作業ツリーを書き換えたままにするか。 */
+  dirtyOnSuccess?: (inv: Invocation, kind: PromptKind) => boolean;
   /** レビューの本文。省略時は must あり（指摘を直せば再レビューする、今までどおりの流れ）。 */
   review?: (round: number, reviewer: string) => string;
+  /** ゲートの手順書一覧。省略時は空（ゲートなし）。 */
+  gates?:
+    | Array<{ name: string; path?: string; content?: string }>
+    | ((baseSha: string) => Promise<GateFile[]> | GateFile[]);
+  /** ゲートの実行結果本文。省略時は合格。 */
+  gate?: (round: number, gateName: string) => string;
   /** 会話 ID を返さないエージェント（出力を読めなかったとき）。 */
   noSession?: boolean;
 }
@@ -128,11 +137,10 @@ export function pipelineHarness(opts: HarnessOptions) {
   const stages: string[] = [];
   const logs: string[] = [];
   const savedLogs: string[] = [];
-  const inbox = opts.inbox ?? false;
-  let inboxTaken = false;
   const commits = [...opts.commits];
   const snapshots = [...(opts.github?.snapshots ?? [])];
   const storedFiles = new Map<string, string>();
+  if (opts.inbox) storedFiles.set("inbox.md", "追加指示");
 
   const github: GitHub | null = opts.github
     ? {
@@ -158,6 +166,7 @@ export function pipelineHarness(opts: HarnessOptions) {
         return { ok: false, session: null, failure: opts.failure ?? "unavailable" };
       }
       if ((kind === "implement" || kind === "fix") && commits.shift()) head++;
+      if (opts.dirtyOnSuccess?.(inv, kind)) dirty++;
       const id = !session
         ? null
         : session.kind === "resume"
@@ -167,6 +176,20 @@ export function pipelineHarness(opts: HarnessOptions) {
     },
     head: async () => `sha${head}`,
     fingerprint: async () => `sha${head}+${dirty}`,
+    uncommitted: async () => Array.from({ length: dirty }, (_, i) => `?? left-${i + 1}.txt`),
+    findGates: async (baseSha) => {
+      if (typeof opts.gates === "function") {
+        return opts.gates(baseSha);
+      }
+      if (Array.isArray(opts.gates)) {
+        return opts.gates.map((g) => ({
+          name: g.name,
+          path: g.path ?? `.agents/autopilot-gate-${g.name}.md`,
+          content: g.content ?? `# ゲート ${g.name}`,
+        }));
+      }
+      return [];
+    },
     github,
     clock: {
       now: () => now,
@@ -182,23 +205,40 @@ export function pipelineHarness(opts: HarnessOptions) {
       read: (n) => {
         const stored = storedFiles.get(n);
         if (stored !== undefined) return stored;
-        const m = n.match(/^review-(\d+)-(.+)\.md$/);
-        if (!m) return null;
-        const initial = (opts.review ?? (() => `${VERDICT.must}\n- must: 直す`))(
-          Number(m[1]),
-          m[2]!,
-        );
-        storedFiles.set(n, initial);
-        return initial;
+        const mRev = n.match(/^review-(\d+)-(.+)\.md$/);
+        if (mRev) {
+          const initial = (opts.review ?? (() => `${VERDICT.must}\n- must: 直す`))(
+            Number(mRev[1]),
+            mRev[2]!,
+          );
+          storedFiles.set(n, initial);
+          return initial;
+        }
+        const mGate = n.match(/^gate-(\d+)-(.+)\.md$/);
+        if (mGate) {
+          const initial = (opts.gate ?? (() => `${GATE_VERDICT.pass}\n確かめて問題なし`))(
+            Number(mGate[1]),
+            mGate[2]!,
+          );
+          storedFiles.set(n, initial);
+          return initial;
+        }
+        return null;
+      },
+      write: (n, text) => {
+        storedFiles.set(n, text);
       },
       append: (n, text) => {
         const cur = deps.state.read(n) ?? "";
         storedFiles.set(n, cur + text);
       },
       takeInbox: (round) => {
-        if (!inbox || inboxTaken) return null;
-        inboxTaken = true;
-        return `inbox-${round}.md`;
+        const text = storedFiles.get("inbox.md");
+        if (!text) return null;
+        const name = `inbox-${round}.md`;
+        storedFiles.set(name, text);
+        storedFiles.delete("inbox.md");
+        return name;
       },
     },
   };
@@ -229,6 +269,7 @@ export function pipelineConfig(
     fix: impl,
     summarize: impl,
     reviewers: reviewerAssignees,
+    gate: reviewers[0] ?? impl,
     maxRounds: 3,
     baseSha: "sha0",
     from: "implement",

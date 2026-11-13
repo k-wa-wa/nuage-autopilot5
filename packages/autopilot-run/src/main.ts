@@ -21,11 +21,13 @@ import { capture, killAll, run } from "./exec.ts";
 import {
   currentBranch,
   defaultBranch,
+  findGateFiles,
   gitCommonDir,
   gitToplevel,
   headSha,
   realGitHub,
   resolveBaseSha,
+  uncommittedFiles,
   worktreeFingerprint,
 } from "./github.ts";
 import {
@@ -51,11 +53,12 @@ const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--
   AGENT        ${AGENTS.join(" | ")}（通常: 実装 agy、レビューは自由 claude・網羅 codex）。
                モデルは models.yaml の並びを使う。決め打ちするときは AGENT:MODEL@EFFORT/MODEL と書く（/ の順に試す）
   --reviewers  レビュー担当（省略時は観点ごとに models.yaml の roles.review の順）
-  --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューは high、要約は light で固定
+  --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューとゲートは high、要約は light で固定
   --max-rounds 修正ループの上限（1〜10、既定: 3）
   --local      push・PR・CI を行わず、ローカルの差分だけで回す（試運転用）
   --from       どこから始めるか。${START_POINTS.join(" | ")}（既定: implement）。
-               review は実装を飛ばし、今のブランチの PR（--local ならローカルの commit）のレビューから始める
+               review は実装を飛ばし、今のブランチの PR（--local ならローカルの commit）のレビューから始める。
+               gate は実装とレビューを飛ばし、CI を待ってからゲートだけを走らせる
   models       担当と段階ごとのモデルの並びを表示する。--file で別のファイルを検査する
 
   models.yaml  $AUTOPILOT_MODELS（既定: ${MODELS_PATH}）。無ければ各 CLI の既定モデルで動く`;
@@ -228,8 +231,9 @@ async function main(argv: string[]): Promise<number> {
 
   await excludeStateDir(root);
   writeFileSync(state.file("run.pid"), String(process.pid));
-  // 前回の要約を窓口が読み違えないよう、始める前に消す。
+  // 前回の要約や人間引き継ぎを窓口が読み違えないよう、始める前に消す。
   rmSync(state.file("result.md"), { force: true });
+  rmSync(state.file("needs-human.md"), { force: true });
 
   const stop = () => {
     killAll();
@@ -277,6 +281,7 @@ async function start(
     [
       `models: implement=${chain(roles.implement)}`,
       `summarize=${chain(roles.summarize)}`,
+      `gate=${chain(roles.gate)}`,
       ...roles.reviewers.map((r) => `review(${r.name})=${chain(r)}`),
     ].join(" "),
   );
@@ -318,6 +323,8 @@ async function start(
       },
       head: () => headSha(root),
       fingerprint: () => worktreeFingerprint(root),
+      uncommitted: () => uncommittedFiles(root),
+      findGates: (baseSha) => findGateFiles(root, baseSha),
       github: opts.local ? null : realGitHub(root),
       clock: { now: () => Date.now(), sleep: (ms) => Bun.sleep(ms) },
       state: {
@@ -326,6 +333,7 @@ async function start(
         rel: (n) => state.rel(n),
         file: (n) => state.file(n),
         read: (n) => state.read(n),
+        write: (n, t) => state.write(n, t),
         append: (n, t) => state.append(n, t),
         takeInbox: (r) => state.takeInbox(r),
       },

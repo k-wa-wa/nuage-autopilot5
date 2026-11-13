@@ -171,6 +171,19 @@ export async function worktreeFingerprint(cwd: string): Promise<string> {
   return hash.digest("hex");
 }
 
+/**
+ * 作業ツリーに残っている未 commit のファイル（`git status --porcelain=v1 --untracked-files=all` の各行）。
+ * .gitignore に当たるものと .autopilot/（exclude 済み）は含まない。
+ * git が失敗したら例外にする（読めないことを「綺麗」とみなさない）。
+ */
+export async function uncommittedFiles(cwd: string): Promise<string[]> {
+  const r = await capture(["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd, {
+    trim: false,
+  });
+  if (r.code !== 0) throw new Error(`git status が失敗した (exit ${r.code}): ${r.stderr}`);
+  return r.stdout.split("\n").filter((l) => l.trim().length > 0);
+}
+
 /** git の共通ディレクトリ（worktree でも本体の .git を指す）。 */
 export async function gitCommonDir(cwd: string): Promise<string> {
   return (await capture(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd))
@@ -180,4 +193,53 @@ export async function gitCommonDir(cwd: string): Promise<string> {
 export async function gitToplevel(cwd: string): Promise<string | null> {
   const r = await capture(["git", "rev-parse", "--show-toplevel"], cwd);
   return r.code === 0 ? r.stdout : null;
+}
+
+export interface GateFile {
+  name: string;
+  path: string;
+  content: string;
+}
+
+/**
+ * ゲートのファイル名から名前を決める。
+ * autopilot-gate と .md を外し、空なら default。
+ */
+export function gateNameFromPath(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  const stripped = base.replace(/^autopilot-gate[-_]?/, "").replace(/\.md$/, "");
+  const encoded = encodeURIComponent(stripped || "default").replace(
+    /[!'()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16)}`,
+  );
+  // 保存先の接頭辞・拡張子・衝突時の連番を含めても 255 バイト以内に収める。
+  if (encoded.length <= 160) return encoded;
+  const hash = createHash("sha256").update(path).digest("hex").slice(0, 16);
+  return `${encoded.slice(0, 140)}-${hash}`;
+}
+
+/**
+ * 基点（baseSha）の木にある .agents/autopilot-gate*.md をすべて見つけ、中身を読む。
+ * PR が自分のゲートを緩めて通り抜けるのを防ぐため、基点のものだけを読む。
+ */
+export async function findGateFiles(cwd: string, baseSha: string): Promise<GateFile[]> {
+  const ls = await capture(["git", "ls-tree", "-r", "--name-only", "-z", baseSha, ".agents/"], cwd);
+  if (ls.code !== 0) throw new Error(`ゲート一覧を読めない: ${ls.stderr}`);
+  const paths = ls.stdout
+    .split("\0")
+    .filter((l) => /^\.agents\/autopilot-gate[^/]*\.md$/.test(l))
+    .sort();
+
+  const gates: GateFile[] = [];
+  const names = new Set<string>();
+  for (const path of paths) {
+    const show = await capture(["git", "show", `${baseSha}:${path}`], cwd, { trim: false });
+    if (show.code !== 0) throw new Error(`ゲートを読めない (${path}): ${show.stderr}`);
+    const baseName = gateNameFromPath(path);
+    let name = baseName;
+    for (let n = 2; names.has(name); n++) name = `${baseName}-${n}`;
+    names.add(name);
+    gates.push({ name, path, content: show.stdout });
+  }
+  return gates;
 }

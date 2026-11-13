@@ -4,10 +4,13 @@ import { join } from "node:path";
 import {
   currentBranch,
   defaultBranch,
+  findGateFiles,
+  gateNameFromPath,
   parseChecks,
   parseFailedRunId,
   parsePrNumber,
   resolveBaseSha,
+  uncommittedFiles,
 } from "./github.ts";
 import { GH_NO_AUTH, GH_NO_PR, git, tempRepo } from "./testing/helpers.ts";
 
@@ -116,5 +119,83 @@ describe("git の読み取り", () => {
   test("既定ブランチが分からなくても origin/HEAD などで起点を探す", async () => {
     repo = tempRepo();
     expect(await resolveBaseSha(repo.work, null)).toBe(git(repo.work, "rev-parse", "HEAD"));
+  });
+
+  test("uncommittedFiles: 変更・未追跡のファイルを並べ、ignore に当たるものと .autopilot/ は含めない", async () => {
+    repo = tempRepo();
+    expect(await uncommittedFiles(repo.work)).toEqual([]);
+    writeFileSync(join(repo.work, ".gitignore"), "ignored/\n");
+    git(repo.work, "add", ".gitignore");
+    git(repo.work, "commit", "-qm", "ignore");
+    writeFileSync(join(repo.work, ".git", "info", "exclude"), ".autopilot/\n");
+    mkdirSync(join(repo.work, "ignored"));
+    writeFileSync(join(repo.work, "ignored", "x.log"), "x\n");
+    mkdirSync(join(repo.work, ".autopilot"));
+    writeFileSync(join(repo.work, ".autopilot", "needs-human.md"), "x\n");
+    expect(await uncommittedFiles(repo.work)).toEqual([]);
+    writeFileSync(join(repo.work, "README.md"), "changed\n");
+    mkdirSync(join(repo.work, "out", "deep"), { recursive: true });
+    writeFileSync(join(repo.work, "out", "deep", "new.txt"), "new\n");
+    // 先頭の空白（作業ツリーだけの変更）も保つ。
+    expect(await uncommittedFiles(repo.work)).toEqual([" M README.md", "?? out/deep/new.txt"]);
+  });
+
+  test("uncommittedFiles: git が失敗したら綺麗とみなさず例外にする", async () => {
+    repo = tempRepo();
+    await expect(uncommittedFiles(repo.root)).rejects.toThrow("git status が失敗した");
+  });
+
+  test("gateNameFromPath: ファイル名からゲート名を決める", () => {
+    expect(gateNameFromPath(".agents/autopilot-gate.md")).toBe("default");
+    expect(gateNameFromPath("autopilot-gate.md")).toBe("default");
+    expect(gateNameFromPath(".agents/autopilot-gate-e2e.md")).toBe("e2e");
+    expect(gateNameFromPath(".agents/autopilot-gate-perf.md")).toBe("perf");
+    expect(gateNameFromPath(".agents/autopilot-gate_custom.md")).toBe("custom");
+  });
+
+  test("存在しない基点をゲートなしと扱わない", async () => {
+    repo = tempRepo();
+    await expect(findGateFiles(repo.work, "missing-base")).rejects.toThrow("ゲート一覧を読めない");
+    expect(await findGateFiles(repo.work, "HEAD")).toEqual([]);
+  });
+
+  test("特殊文字の名前も拾い、同名の手順書が衝突せず、サブディレクトリは含めない", async () => {
+    repo = tempRepo();
+    const agents = join(repo.work, ".agents");
+    mkdirSync(join(agents, "autopilot-gate-dir"), { recursive: true });
+    const names = ["", "-default", "_default", "-日本語", "-空 白", "-a\nb"];
+    for (const name of names) {
+      writeFileSync(join(agents, `autopilot-gate${name}.md`), `手順 ${name}`);
+    }
+    writeFileSync(join(agents, "autopilot-gate-dir", "nested.md"), "対象外");
+    git(repo.work, "add", ".agents");
+    git(repo.work, "commit", "-qm", "gates");
+    const gates = await findGateFiles(repo.work, "HEAD");
+    expect(gates).toHaveLength(names.length);
+    expect(new Set(gates.map((g) => g.name)).size).toBe(names.length);
+    for (const gate of gates) expect(gate.name).toMatch(/^[A-Za-z0-9._%-]+$/);
+    expect(gates.some((g) => g.content === "手順 -日本語")).toBe(true);
+  });
+
+  test("findGateFiles: 基点からゲートを見つけて読む（作業ツリーの変更や新規ファイルは使われない）", async () => {
+    repo = tempRepo();
+    // 基点にゲートファイルをコミットする
+    const agentsDir = join(repo.work, ".agents");
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, "autopilot-gate.md"), "# 元のゲート\n");
+    writeFileSync(join(agentsDir, "autopilot-gate-e2e.md"), "# E2E ゲート\n");
+    git(repo.work, "add", "-A");
+    git(repo.work, "commit", "-qm", "add base gates");
+    const baseSha = git(repo.work, "rev-parse", "HEAD");
+
+    // 作業ツリーで既存のゲートを緩め（書き換え）、新しいゲートを追加する
+    writeFileSync(join(agentsDir, "autopilot-gate.md"), "# 緩めたゲート\n");
+    writeFileSync(join(agentsDir, "autopilot-gate-new.md"), "# 新規ゲート\n");
+
+    const gates = await findGateFiles(repo.work, baseSha);
+    expect(gates).toHaveLength(2);
+    expect(gates.map((g) => g.name).sort()).toEqual(["default", "e2e"]);
+    expect(gates.find((g) => g.name === "default")?.content).toBe("# 元のゲート\n");
+    expect(gates.find((g) => g.name === "e2e")?.content).toBe("# E2E ゲート\n");
   });
 });

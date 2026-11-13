@@ -6,6 +6,12 @@ const all = {
   implement: prompts.implement("pr"),
   reviewFree: prompts.review("free", { baseSha: "abc123", since: null }),
   reviewCoverage: prompts.review("coverage", { baseSha: "abc123", since: null }),
+  gate: prompts.gate({
+    name: "e2e",
+    sourcePath: ".autopilot/gate-src-e2e.md",
+    baseSha: "abc123",
+    pr: 7,
+  }),
   fix: prompts.fix({
     mode: "pr",
     scope: "must-should",
@@ -87,12 +93,45 @@ describe("プロンプト", () => {
       reviews: [".autopilot/review-1-free.md", ".autopilot/review-1-coverage.md"],
       ciLog: ".autopilot/ci-fail-1.log",
       inbox: ".autopilot/inbox-1.md",
+      gateLogs: [".autopilot/gate-1-e2e.md"],
     });
     expect(p).toContain("人間からの追加指示: .autopilot/inbox-1.md（最優先）");
-    expect(p).toContain("CI の失敗ログ: .autopilot/ci-fail-1.log（必ず直す）");
+    expect(p).toContain("CI の失敗ログ: .autopilot/ci-fail-1.log");
+    expect(p).not.toContain("（必ず直す）");
+    expect(p).toContain("ゲートの不合格結果: .autopilot/gate-1-e2e.md");
     expect(p).toContain(".autopilot/review-1-free.md, .autopilot/review-1-coverage.md");
+    expect(p).toContain("人間に返すかを自分で判断する");
+    expect(p).toContain("失敗を隠す修正はしない");
+    expect(p).toContain(".autopilot/needs-human.md");
     expect(all.fix).not.toContain("追加指示");
     expect(all.fix).not.toContain("CI の失敗ログ");
+    expect(all.fix).not.toContain("ゲートの不合格結果");
+  });
+
+  test("ゲートのプロンプトは 4 つの判定・守ること優先・ファイル非変更・差分読解を含む", () => {
+    const p = all.gate;
+    expect(p).toContain("あなたはリポジトリのゲート検証担当である");
+    expect(p).toContain("ファイルは一切変更しない");
+    expect(p).toContain("ゲートの手順書の「守ること」（読み取り専用など）を最優先にする");
+    // ゲートは並列に走るので、作業ツリー全体を戻すと別のゲートのファイルを消す。
+    expect(p).toContain("自分が作ったファイル");
+    expect(p).toContain("作業ツリー全体を戻すコマンドは使わない");
+    expect(p).not.toContain("作業ツリーを実行前の状態に戻す");
+    expect(p).toContain(prompts.GATE_VERDICT.pass);
+    expect(p).toContain(prompts.GATE_VERDICT.fail);
+    expect(p).toContain(prompts.GATE_VERDICT.skip);
+    expect(p).toContain(prompts.GATE_VERDICT.inconclusive);
+    expect(p).toContain("git diff abc123...HEAD");
+    expect(p).toContain("PR 番号は #7 である");
+
+    const localGate = prompts.gate({
+      name: "e2e",
+      sourcePath: ".autopilot/gate-src-e2e.md",
+      baseSha: "abc123",
+      pr: null,
+    });
+    expect(localGate).toContain("PR 番号はない（--local で実行中）");
+    expect(localGate).toContain("「対象外」と判定する");
   });
 
   test("要約は PR があるときだけ PR 本文も更新させ、観点ごとの担当・件数・欠けた観点を書かせる", () => {
@@ -102,6 +141,10 @@ describe("プロンプト", () => {
     expect(all.summarize).toContain("観点ごとの must / should の件数");
     expect(all.summarize).toContain("片方の観点しか挙げなかった must");
     expect(all.summarize).toContain("欠けた観点があればその旨を書く");
+    expect(all.summarize).toContain("gate-*.md");
+    expect(all.summarize).toContain("needs-human.md");
+    expect(all.summarize).toContain("ゲートごとの判定と担当（CLI・モデル）");
+    expect(all.summarize).toContain("対象外・判定不能もその旨を書く");
 
     const withMissing = prompts.summarize("abc", null, ["free"]);
     expect(withMissing).toContain("全候補が失敗してレビューが欠けた観点: free");
@@ -127,13 +170,17 @@ describe("プロンプト", () => {
     );
   });
 
+  test("修正は brief.md の仕様を読ませる（--from review / gate では実装の会話が無い）", () => {
+    expect(all.fix).toContain(".autopilot/brief.md の仕様を読み");
+  });
+
   test("修正は、変更しないことを失敗と思わせない", () => {
     expect(all.fix).toContain("変更しないことは失敗ではない");
   });
 });
 
 describe("reviewHasMust", () => {
-  test("1 行目が must なしの判定なら false", () => {
+  test("must なしの判定なら false", () => {
     expect(prompts.reviewHasMust(`${prompts.VERDICT.none}\n- nit: x`)).toBe(false);
   });
 
@@ -150,7 +197,51 @@ describe("reviewHasMust", () => {
   test("判定が読めなければ、見落とさないよう must ありとみなす", () => {
     expect(prompts.reviewHasMust("")).toBe(true);
     expect(prompts.reviewHasMust("指摘なし")).toBe(true);
-    expect(prompts.reviewHasMust(`前置き\n${prompts.VERDICT.none}`)).toBe(true);
+    expect(prompts.reviewHasMust(`前置き\n${prompts.VERDICT.none}（should あり）`)).toBe(true);
     expect(prompts.reviewHasMust(`${prompts.VERDICT.none}（should あり）`)).toBe(true);
+  });
+
+  test("前置きの行があっても、最初の「判定:」の行を読む", () => {
+    expect(prompts.reviewHasMust(`前置き\n${prompts.VERDICT.none}`)).toBe(false);
+    expect(prompts.reviewHasMust(`前置き\n\n**${prompts.VERDICT.must}**`)).toBe(true);
+    expect(prompts.reviewHasMust(`前置き\n${prompts.VERDICT.must}\n${prompts.VERDICT.none}`)).toBe(
+      true,
+    );
+  });
+});
+
+describe("parseGateVerdict", () => {
+  test("4 つの判定を正しく読む", () => {
+    expect(prompts.parseGateVerdict(`${prompts.GATE_VERDICT.pass}\n問題なし`)).toBe("pass");
+    expect(prompts.parseGateVerdict(`${prompts.GATE_VERDICT.fail}\n壊れている`)).toBe("fail");
+    expect(prompts.parseGateVerdict(`${prompts.GATE_VERDICT.skip}\nPreviewなし`)).toBe("skip");
+    expect(prompts.parseGateVerdict(`${prompts.GATE_VERDICT.inconclusive}\n500エラー`)).toBe(
+      "inconclusive",
+    );
+  });
+
+  test("Markdown の装飾や前の空行があっても判定を読む", () => {
+    expect(prompts.parseGateVerdict(`\n\n**${prompts.GATE_VERDICT.pass}**\n`)).toBe("pass");
+    expect(prompts.parseGateVerdict(`# ${prompts.GATE_VERDICT.fail}`)).toBe("fail");
+    expect(prompts.parseGateVerdict(`> ${prompts.GATE_VERDICT.skip}`)).toBe("skip");
+  });
+
+  test("判定が読めなければ unknown を返す", () => {
+    expect(prompts.parseGateVerdict("")).toBe("unknown");
+    expect(prompts.parseGateVerdict("合格")).toBe("unknown");
+    expect(prompts.parseGateVerdict("判定: 保留")).toBe("unknown");
+    expect(prompts.parseGateVerdict("前置き\n判定: 保留")).toBe("unknown");
+  });
+
+  test("前置きの行があっても、最初の「判定:」の行を読む", () => {
+    expect(prompts.parseGateVerdict(`前置き\n${prompts.GATE_VERDICT.pass}`)).toBe("pass");
+    expect(prompts.parseGateVerdict(`前置き\n\n> ${prompts.GATE_VERDICT.inconclusive}`)).toBe(
+      "inconclusive",
+    );
+    expect(
+      prompts.parseGateVerdict(
+        `前置き\n${prompts.GATE_VERDICT.fail}\n${prompts.GATE_VERDICT.pass}`,
+      ),
+    ).toBe("fail");
   });
 });

@@ -1,21 +1,26 @@
 import { type FailureKind, formatInvocation, type Invocation } from "./agents.ts";
 import { type CiVerdict, judgeCi } from "./ci.ts";
-import type { GitHub } from "./github.ts";
+import type { GateFile, GitHub } from "./github.ts";
 import type { Assignee, Assignment } from "./models.ts";
 import * as prompts from "./prompts.ts";
 
 /**
  * 任された仕事を最後まで進める流れ。
  *
- *   実装 → PR → [CI 待ち ‖ レビュー → 修正] を上限回数まで → 要約
+ *   実装 → PR → [CI 待ち ‖ レビュー → 修正] を上限回数まで → ゲート → 要約
  *
  * 修正ループは、指摘の連鎖で上限まで回らないように絞る。
  * - 1 周目は must と should を直し、2 周目以降は must だけを直す。nit と見送った指摘は要約で人間に渡す
  * - レビューに must が無ければ、直した後に再レビューしない（CI だけ確かめる）
  * - CI 待ちとレビューは同時に進める。レビューは CI の結果を使わない
  * - 修正担当は実装担当の会話の続きで動く。コードを一から読み直さずに済む
+ * - 修正ループが done で終わろうとするときにゲートを走らせる。不合格なら修正ループへ戻る
+ *
+ * 実装・修正・ゲートの担当の後には毎回、作業ツリーに未 commit のファイルが残っていないかを確かめる。
+ * 残っていれば、未 commit の変更込みで検証して done にしないよう needs-human にする。
  *
  * --from review では実装を飛ばし、今のブランチの PR（--local ならローカルの commit）のレビューから始める。
+ * --from gate では実装とレビューを飛ばし、CI を待ってからゲートだけを走らせる。
  *
  * 順序と待ちはここが持ち、判断は LLM に任せる。
  * 成否はエージェントの自己申告ではなく、commit・PR・push が実際にできたかで判定する。
@@ -27,8 +32,8 @@ import * as prompts from "./prompts.ts";
 /** CI の状態を読み直す間隔。 */
 export const CI_POLL_MS = 30_000;
 
-/** どこから始めるか。review は実装が済んでいて、レビューだけ回したいとき。 */
-export const START_POINTS = ["implement", "review"] as const;
+/** どこから始めるか。review はレビューから、gate はゲートから。 */
+export const START_POINTS = ["implement", "review", "gate"] as const;
 export type StartPoint = (typeof START_POINTS)[number];
 
 export interface Config extends Assignment {
@@ -62,6 +67,10 @@ export interface Deps {
   head(): Promise<string>;
   /** 作業ツリーの状態（HEAD・未 commit の変更）を表す値。エージェントが何か変えたかを比べる。 */
   fingerprint(): Promise<string>;
+  /** 作業ツリーに残っている未 commit のファイル（git status --porcelain の各行）。綺麗なら空。 */
+  uncommitted(): Promise<string[]>;
+  /** 基点の木にあるゲートファイルを見つける。 */
+  findGates(baseSha: string): Promise<GateFile[]>;
   /** PR と CI。--local のときは null。 */
   github: GitHub | null;
   clock: {
@@ -74,6 +83,7 @@ export interface Deps {
     rel(name: string): string;
     file(name: string): string;
     read(name: string): string | null;
+    write(name: string, text: string): void;
     append(name: string, text: string): void;
     takeInbox(round: number): string | null;
   };
@@ -180,21 +190,25 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
       return { kind: "failed", reason: "何も commit されなかった" };
     }
   }
+  /** 実装担当が未 commit のファイルを残したら、レビュー・ゲートへ進まず要約して人間に返す。 */
+  const leftover = cfg.from === "implement" ? await leftoverReason(d, "実装担当の実行後") : null;
 
   let pr: number | null = null;
   if (d.github) {
     pr = await d.github.prNumber();
-    if (pr === null) {
+    if (pr === null && leftover === null) {
       return {
         kind: "failed",
         reason: cfg.from === "implement" ? "PR が作られなかった" : "PR が無い",
       };
     }
-    d.state.log(`PR #${pr}`);
+    if (pr !== null) d.state.log(`PR #${pr}`);
   }
 
   const missingPerspectives = new Set<string>();
-  const outcome = await rounds(cfg, d, runner, writer, mode, pr, missingPerspectives);
+  const outcome: Outcome = leftover
+    ? { kind: "needs-human", reason: leftover }
+    : await rounds(cfg, d, runner, writer, mode, pr, missingPerspectives);
   if (outcome.kind === "failed") return outcome;
 
   d.state.stage("summarizing");
@@ -223,9 +237,15 @@ async function rounds(
   missingPerspectives: Set<string>,
 ): Promise<Outcome> {
   /** 今の HEAD にレビューが要るか。must の無いレビューの後の修正は、CI だけ確かめる。 */
-  let needsReview = true;
+  let needsReview = cfg.from !== "gate";
   /** 前回レビューした HEAD。2 周目以降のレビューは、ここからの修正を中心に見る。 */
   let reviewedAt: string | null = null;
+  /** 直前の周で直せなかったゲート不合格。次の周の修正担当へ渡す。 */
+  let pendingGateFailures: string[] | null = null;
+  /** 全ゲートが合格（または対象外・ゲートなし）した HEAD。同じ HEAD でゲートを走らせ直さない。 */
+  let gatesPassedAt: string | null = null;
+  /** 直前の修正がゲートの不合格を直したものか。上限に達したときの理由に使う。 */
+  let lastFixForGate = false;
 
   for (let round = 1; round <= cfg.maxRounds; round++) {
     const head = await d.head();
@@ -278,16 +298,30 @@ async function rounds(
     const must = (reviews ?? []).some((name) => prompts.reviewHasMust(d.state.read(name) ?? ""));
 
     const inboxName = d.state.takeInbox(round);
-    const inbox = inboxName ? d.state.rel(inboxName) : null;
+    let inbox = inboxName ? d.state.rel(inboxName) : null;
 
-    if (!must && ciLog === null && inbox === null) {
+    let gateLogs: string[] = pendingGateFailures ?? [];
+    pendingGateFailures = null;
+
+    if (!must && ciLog === null && inbox === null && gateLogs.length === 0) {
       if (reviews === null) {
-        d.state.log("前の修正は must ではないので、CI だけ確かめて再レビューせずに終える");
-        return { kind: "done" };
-      }
-      if (round > 1) {
+        d.state.log("レビューは不要なので、CI の確認後にゲートへ進む");
+      } else if (round > 1) {
         d.state.log("レビューに must が無いので、何も直さずに終える");
-        return { kind: "done" };
+      }
+      if (reviews === null || round > 1) {
+        const gateOutcome = await runGates(cfg, d, runner, round, pr);
+        if (gateOutcome.kind === "needs-human") {
+          return { kind: "needs-human", reason: gateOutcome.reason };
+        }
+        // ゲートの待ち時間に届いた指示も、この周の修正へ渡す。
+        const duringGate = d.state.takeInbox(round);
+        inbox = duringGate ? d.state.rel(duringGate) : null;
+        if (gateOutcome.kind === "fail") gateLogs = gateOutcome.failures;
+        else {
+          gatesPassedAt = head;
+          if (inbox === null) return { kind: "done" };
+        }
       }
     }
 
@@ -298,21 +332,72 @@ async function rounds(
       reviews: (reviews ?? []).map((name) => d.state.rel(name)),
       ciLog,
       inbox,
+      gateLogs,
     });
     if (!(await writer.run(cfg.fix, prompt))) {
       return { kind: "failed", reason: "修正担当が異常終了した" };
     }
 
-    if ((await d.head()) === head) {
-      return ciLog ? { kind: "needs-human", reason: "CI の失敗を直せなかった" } : { kind: "done" };
+    // HEAD が変わったかに関係なく毎回確かめる。一部だけ commit した残りをゲートで確かめて done にしない。
+    const leftover = await leftoverReason(d, "修正担当の実行後");
+    const needsHuman = d.state.read("needs-human.md")?.trim();
+    if (needsHuman || leftover) {
+      const asked = needsHuman
+        ? (needsHuman
+            .split("\n")
+            .map((l) => l.trim())
+            .find((l) => l.length > 0) ?? "修正担当が人間に判断を求めた")
+        : null;
+      return { kind: "needs-human", reason: [asked, leftover].filter(Boolean).join("。") };
     }
-    // CI だけを直した修正は、CI が通れば足りる。
-    needsReview = must || inbox !== null;
-    if (!needsReview) d.state.log("must の無い修正なので、次は CI だけ確かめる");
+
+    if ((await d.head()) === head) {
+      if (ciLog) return { kind: "needs-human", reason: "CI の失敗を直せなかった" };
+      if (gateLogs.length > 0)
+        return { kind: "needs-human", reason: "ゲートの不合格を直せなかった" };
+      if (gatesPassedAt === head) {
+        d.state.log("この HEAD はゲートに合格済みなので、ゲートを走らせ直さない");
+      } else {
+        const gateOutcome = await runGates(cfg, d, runner, round, pr);
+        if (gateOutcome.kind === "needs-human") {
+          return { kind: "needs-human", reason: gateOutcome.reason };
+        }
+        if (gateOutcome.kind === "fail") pendingGateFailures = gateOutcome.failures;
+        else gatesPassedAt = head;
+      }
+      if (pendingGateFailures === null && !d.state.read("inbox.md")) return { kind: "done" };
+      // この周の修正は済んでいる。新しい指示は退避せず次の周に渡す。
+      needsReview = false;
+      continue;
+    }
+
+    // ゲートだけの修正は再レビューしない。追加指示による変更はレビューする。
+    needsReview = inbox !== null || (must && gateLogs.length === 0);
+    lastFixForGate = gateLogs.length > 0;
+    if (!needsReview) {
+      d.state.log(
+        gateLogs.length > 0
+          ? "ゲートの不合格を直したので、次は CI と全ゲートを確かめる"
+          : "must の無い修正なので、次は CI だけ確かめる",
+      );
+    }
+  }
+  const remaining = [
+    pendingGateFailures && "ゲートの不合格が未修正で残っている",
+    d.state.read("inbox.md") && "人間の追加指示が未処理で残っている",
+  ].filter(Boolean);
+  if (remaining.length === 0) {
+    remaining.push(
+      needsReview
+        ? "最後の修正は未レビュー"
+        : lastFixForGate
+          ? "最後の修正の CI と全ゲートを確かめていない"
+          : "最後の修正の CI を確かめていない",
+    );
   }
   return {
     kind: "needs-human",
-    reason: `修正ループが上限（${cfg.maxRounds} 回）に達した。${needsReview ? "最後の修正は未レビュー" : "最後の修正の CI を確かめていない"}`,
+    reason: `修正ループが上限（${cfg.maxRounds} 回）に達した。${remaining.join("。")}`,
   };
 }
 
@@ -352,6 +437,20 @@ async function review(
   };
 }
 
+/** 理由に並べる未 commit のファイルの数。多ければ先頭だけにする。 */
+const LEFTOVER_SHOWN = 5;
+
+/** 作業ツリーに未 commit のファイルが残っていれば、needs-human の理由を返す。綺麗なら null。 */
+async function leftoverReason(d: Deps, when: string): Promise<string | null> {
+  const files = (await d.uncommitted()).map((l) => l.trim());
+  if (files.length === 0) return null;
+  const shown = files.slice(0, LEFTOVER_SHOWN).join(", ");
+  const more = files.length > LEFTOVER_SHOWN ? ` ほか ${files.length - LEFTOVER_SHOWN} 件` : "";
+  const reason = `${when}、作業ツリーに未 commit のファイルが残っている: ${shown}${more}`;
+  d.state.log(reason);
+  return reason;
+}
+
 /** CI の判定が出るまで待つ。判定そのものは judgeCi に任せる。 */
 async function waitCi(d: Deps, github: GitHub, pr: number): Promise<CiVerdict> {
   const start = d.clock.now();
@@ -369,4 +468,93 @@ async function waitCi(d: Deps, github: GitHub, pr: number): Promise<CiVerdict> {
     lastWhy = v.why;
     await d.clock.sleep(CI_POLL_MS);
   }
+}
+
+type GateOutcome =
+  | { kind: "pass" }
+  | { kind: "none" }
+  | { kind: "fail"; failures: string[] }
+  | { kind: "needs-human"; reason: string };
+
+/**
+ * リポジトリのゲート（.agents/autopilot-gate*.md）を並列に実行する。
+ * 基点の木から読んだ手順書を実行し、合否を判定する。
+ */
+async function runGates(
+  cfg: Config,
+  d: Deps,
+  runner: Runner,
+  round: number,
+  pr: number | null,
+): Promise<GateOutcome> {
+  let gateFiles: GateFile[];
+  try {
+    gateFiles = await d.findGates(cfg.baseSha);
+  } catch (e) {
+    const reason = `ゲートの手順書を読めない: ${e instanceof Error ? e.message : String(e)}`;
+    d.state.log(reason);
+    return { kind: "needs-human", reason };
+  }
+  if (gateFiles.length === 0) {
+    d.state.log("ゲートなし");
+    return { kind: "none" };
+  }
+
+  d.state.stage(`gating (round ${round}: ${gateFiles.map((g) => g.name).join(", ")})`);
+
+  const results = await Promise.all(
+    gateFiles.map(async (g) => {
+      const srcFile = `gate-src-${g.name}.md`;
+      d.state.write(srcFile, g.content);
+
+      const outName = `gate-${round}-${g.name}.md`;
+      const prompt = prompts.gate({
+        name: g.name,
+        sourcePath: d.state.rel(srcFile),
+        baseSha: cfg.baseSha,
+        pr,
+      });
+
+      const r = await runner.run(cfg.gate, prompt, { writes: false, output: outName });
+      if (r.ok && r.invocation) {
+        const invStr = formatInvocation(r.invocation);
+        d.state.append(outName, `\n担当: ${invStr}\n`);
+        const content = d.state.read(outName) ?? "";
+        const verdict = prompts.parseGateVerdict(content);
+        d.state.log(`ゲート (${g.name}): ${verdict} 担当: ${invStr}`);
+        return { name: g.name, verdict, file: outName };
+      }
+      d.state.log(`ゲート失敗 (${g.name}): ${cfg.gate.name} の全候補が失敗した`);
+      return { name: g.name, verdict: "failed_run" as const, file: outName };
+    }),
+  );
+
+  // ゲートはファイルを書き換えない。残ったファイルを次の修正担当のものと取り違えないよう、ここで止める。
+  const leftover = await leftoverReason(d, "ゲートの実行後");
+  if (leftover) return { kind: "needs-human", reason: leftover };
+
+  const failedRun = results.find((r) => r.verdict === "failed_run");
+  if (failedRun) {
+    return { kind: "needs-human", reason: `ゲート担当が全員失敗した: ${failedRun.name}` };
+  }
+
+  const inconclusive = results.find((r) => r.verdict === "inconclusive");
+  if (inconclusive) {
+    return { kind: "needs-human", reason: `ゲートが判定不能: ${inconclusive.name}` };
+  }
+
+  const unknown = results.find((r) => r.verdict === "unknown");
+  if (unknown) {
+    return { kind: "needs-human", reason: `ゲートの判定を読めない: ${unknown.name}` };
+  }
+
+  const fails = results.filter((r) => r.verdict === "fail");
+  if (fails.length > 0) {
+    return {
+      kind: "fail",
+      failures: fails.map((f) => d.state.rel(f.file)),
+    };
+  }
+
+  return { kind: "pass" };
 }

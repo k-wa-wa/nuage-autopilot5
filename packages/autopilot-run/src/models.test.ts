@@ -127,10 +127,11 @@ describe("assignRoles", () => {
     expect(models(roles("high").implement)).toEqual(["model-big"]);
   });
 
-  test("レビューは常に high、要約は常に light", () => {
+  test("レビュー・ゲートは常に high、要約は常に light", () => {
     for (const level of ["high", "standard", "light"] as const) {
       expect(models(roles(level).reviewers[0]!)).toEqual(["model-x-high", "model-y-high"]);
       expect(models(roles(level).reviewers[1]!)).toEqual(["model-x-high", "model-y-high"]);
+      expect(models(roles(level).gate)).toEqual(["model-x-high", "model-y-high"]);
       expect(models(roles(level).summarize)).toEqual(["model-small"]);
     }
   });
@@ -164,6 +165,7 @@ describe("担当の優先順", () => {
   test("設定なしでは実装 agy → codex → claude、レビューは自由 claude → codex → agy、網羅 codex → claude → agy", () => {
     const roles = assignRoles({ level: "high" }, {});
     expect(roles.implement.chain.map((i) => i.agent)).toEqual(["agy", "codex", "claude"]);
+    expect(roles.gate.chain.map((i) => i.agent)).toEqual(["claude", "codex", "agy"]);
     expect(roles.reviewers).toHaveLength(2);
     expect(roles.reviewers[0]!.perspective).toBe("free");
     expect(roles.reviewers[0]!.chain.map((i) => i.agent)).toEqual(["claude", "codex", "agy"]);
@@ -186,6 +188,7 @@ describe("担当の優先順", () => {
     expect(roles.reviewers[0]!.chain.map((i) => i.agent)).toEqual(["agy", "agy", "claude"]);
     expect(roles.reviewers[1]!.chain.map((i) => i.agent)).toEqual(["claude", "agy", "agy"]);
     expect(roles.summarize.chain).toEqual([{ agent: "codex" }, { agent: "agy" }]);
+    expect(roles.gate.chain).toEqual(roles.reviewers[0]!.chain);
     expect(formatModelTable(table)).toContain("impl     codex → agy");
   });
 
@@ -217,6 +220,7 @@ describe("担当の優先順", () => {
     );
     expect(two.reviewers[0]!.name).toBe("claude");
     expect(two.reviewers[1]!.name).toBe("agy");
+    expect(two.gate.chain).toEqual([{ agent: "claude" }]);
   });
 
   test("担当の誤記・空・重複・Copilot は起動前に拒否する", () => {

@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildArgv, classifyFailure } from "./agents.ts";
 import { judgeCi } from "./ci.ts";
 import { run } from "./exec.ts";
-import { parseChecks, parsePrNumber } from "./github.ts";
+import { findGateFiles, gateNameFromPath, parseChecks, parsePrNumber } from "./github.ts";
 import { parseStartOptions } from "./main.ts";
 import { reviewFileName, runPipeline } from "./pipeline.ts";
 import * as prompts from "./prompts.ts";
 import { VERDICT } from "./prompts.ts";
+import { State } from "./state.ts";
 import {
   assignee,
   CLAUDE_UNAVAILABLE_MESSAGES,
@@ -16,11 +17,34 @@ import {
   checks,
   GH_NO_AUTH,
   GH_NO_PR,
+  git,
   pipelineConfig,
   pipelineHarness,
   splitUtf8Script,
   tempDir,
+  tempRepo,
 } from "./testing/helpers.ts";
+
+describe("ゲート読み取りの失敗をゲートなしとして通り抜けさせない", () => {
+  test("手順書が読めなければ修正ループを回さず人間へ返し、要約する", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      gates: () => {
+        throw new Error("git show failed");
+      },
+    });
+    const outcome = await runPipeline(
+      pipelineConfig(assignee("claude"), [assignee("agy")], { from: "gate" }),
+      h.deps,
+    );
+    expect(outcome).toEqual({
+      kind: "needs-human",
+      reason: "ゲートの手順書を読めない: git show failed",
+    });
+    expect(h.logs).not.toContain("ゲートなし");
+    expect(h.calls.map((c) => c.kind)).toEqual(["summarize"]);
+  });
+});
 
 /**
  * 実際に踏んだ欠陥の回帰テスト。
@@ -342,5 +366,264 @@ describe("切り替え先に別エージェントの会話 ID を渡さない", 
     const fixes = h.calls.filter((c) => c.kind === "fix");
     expect(fixes.map((c) => c.inv)).toEqual([{ agent: "codex", model: "x1" }]);
     expect(fixes[0]!.session).toEqual({ kind: "resume", id: "conv1" });
+  });
+});
+
+describe("ゲート実行中の追加指示を取りこぼし、追加仕様まで未レビューになった", () => {
+  const cfg = pipelineConfig(assignee("claude"), [assignee("agy")]);
+
+  test("持ち越したゲート不合格と追加指示を一緒に直したら再レビューする", async () => {
+    const h = pipelineHarness({
+      commits: [true, false, true],
+      review: () => VERDICT.none,
+      gates: [{ name: "e2e" }],
+      gate: (round) => (round === 1 ? prompts.GATE_VERDICT.fail : prompts.GATE_VERDICT.pass),
+    });
+    const run = h.deps.runAgent;
+    h.deps.runAgent = async (inv, prompt, opts) => {
+      const result = await run(inv, prompt, opts);
+      if (opts?.output === "gate-1-e2e.md") h.deps.state.write("inbox.md", "追加仕様");
+      return result;
+    };
+    expect(await runPipeline(cfg, h.deps)).toEqual({ kind: "done" });
+    const fixes = h.calls.filter((c) => c.kind === "fix");
+    expect(fixes[1]?.prompt).toContain(".autopilot/gate-1-e2e.md");
+    expect(fixes[1]?.prompt).toContain(".autopilot/inbox-2.md");
+    expect(h.calls.filter((c) => c.output?.startsWith("review-3-")).length).toBe(2);
+  });
+
+  test.each(["gate", "implement"] as const)(
+    "%s からのゲート合格中に届いた指示を処理してから完了する",
+    async (from) => {
+      const h = pipelineHarness({
+        commits: from === "gate" ? [true] : [true, false, true],
+        inbox: from === "implement",
+        review: () => VERDICT.none,
+        gates: [{ name: "e2e" }],
+      });
+      const run = h.deps.runAgent;
+      h.deps.runAgent = async (inv, prompt, opts) => {
+        const result = await run(inv, prompt, opts);
+        if (opts?.output === "gate-1-e2e.md") h.deps.state.write("inbox.md", "ゲート中の追加仕様");
+        return result;
+      };
+      expect(await runPipeline({ ...cfg, from }, h.deps)).toEqual({ kind: "done" });
+      expect(
+        h.calls.some((c) => c.kind === "fix" && c.prompt.includes("人間からの追加指示:")),
+      ).toBe(true);
+      expect(h.deps.state.read("inbox.md")).toBeNull();
+      if (from === "implement") expect(h.deps.state.read("inbox-1.md")).toBe("追加指示");
+      expect(
+        h.calls.filter((c) => c.output?.startsWith(`review-${from === "gate" ? 2 : 3}-`)),
+      ).toHaveLength(2);
+      expect(h.calls.at(-1)?.kind).toBe("summarize");
+    },
+  );
+
+  test("最終周のゲート中に届いた指示は未処理のまま done にしない", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      review: () => VERDICT.none,
+      gates: [{ name: "e2e" }],
+    });
+    const run = h.deps.runAgent;
+    h.deps.runAgent = async (inv, prompt, opts) => {
+      const result = await run(inv, prompt, opts);
+      if (opts?.output === "gate-1-e2e.md") h.deps.state.write("inbox.md", "追加仕様");
+      return result;
+    };
+    const result = await runPipeline({ ...cfg, maxRounds: 1 }, h.deps);
+    expect(result).toEqual({
+      kind: "needs-human",
+      reason: "修正ループが上限（1 回）に達した。人間の追加指示が未処理で残っている",
+    });
+    expect(h.deps.state.read("inbox.md")).toBe("追加仕様");
+  });
+
+  test("最終周で持ち越したゲート不合格は未修正であることを理由に残す", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      review: () => VERDICT.none,
+      gates: [{ name: "e2e" }],
+      gate: () => prompts.GATE_VERDICT.fail,
+    });
+    expect(await runPipeline({ ...cfg, maxRounds: 1 }, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "修正ループが上限（1 回）に達した。ゲートの不合格が未修正で残っている",
+    });
+  });
+});
+
+describe("ゲート合格後の追加指示で HEAD が変わらないと、同じ HEAD でゲートを走らせ直した", () => {
+  // 重いゲートを二度走らせ、2 回目が不安定だと合格済みの HEAD が needs-human になり、1 回目の結果も上書きされた。
+  const cfg = pipelineConfig(assignee("claude"), [assignee("agy")]);
+
+  function deliverInboxDuringGate(h: ReturnType<typeof pipelineHarness>, output: string) {
+    const run = h.deps.runAgent;
+    h.deps.runAgent = async (inv, prompt, opts) => {
+      const result = await run(inv, prompt, opts);
+      if (opts?.output === output) h.deps.state.write("inbox.md", "ゲート中の追加指示");
+      return result;
+    };
+  }
+
+  test("合格済みの HEAD ではゲートを走らせ直さずに done にする", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      review: () => VERDICT.none,
+      gates: [{ name: "e2e" }],
+      gate: (round) =>
+        round === 1 ? prompts.GATE_VERDICT.pass : prompts.GATE_VERDICT.inconclusive,
+    });
+    deliverInboxDuringGate(h, "gate-1-e2e.md");
+    expect(await runPipeline({ ...cfg, from: "gate" }, h.deps)).toEqual({ kind: "done" });
+    expect(h.calls.filter((c) => c.kind === "fix")).toHaveLength(1);
+    expect(h.calls.filter((c) => c.output?.startsWith("gate-"))).toHaveLength(1);
+    expect(h.logs).toContain("この HEAD はゲートに合格済みなので、ゲートを走らせ直さない");
+  });
+
+  test("合格済みの HEAD でも、未処理の追加指示が残れば次の周へ回す", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      review: () => VERDICT.none,
+      gates: [{ name: "e2e" }],
+    });
+    const run = h.deps.runAgent;
+    let fixes = 0;
+    h.deps.runAgent = async (inv, prompt, opts) => {
+      const result = await run(inv, prompt, opts);
+      if (opts?.output === "gate-1-e2e.md") h.deps.state.write("inbox.md", "1 通目");
+      if (prompt.includes("人間からの追加指示:") && ++fixes === 1) {
+        h.deps.state.write("inbox.md", "2 通目");
+      }
+      return result;
+    };
+    expect(await runPipeline({ ...cfg, from: "gate" }, h.deps)).toEqual({ kind: "done" });
+    const fixPrompts = h.calls.filter((c) => c.kind === "fix").map((c) => c.prompt);
+    expect(fixPrompts).toHaveLength(2);
+    expect(fixPrompts[1]).toContain(".autopilot/inbox-2.md");
+    expect(h.calls.filter((c) => c.output?.startsWith("gate-"))).toHaveLength(1);
+  });
+
+  test("ゲート不合格と追加指示が同時に来て HEAD が変わらなければ needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      review: () => VERDICT.none,
+      gates: [{ name: "e2e" }],
+      gate: () => prompts.GATE_VERDICT.fail,
+    });
+    deliverInboxDuringGate(h, "gate-1-e2e.md");
+    expect(await runPipeline({ ...cfg, from: "gate" }, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "ゲートの不合格を直せなかった",
+    });
+    const fix = h.calls.find((c) => c.kind === "fix");
+    expect(fix?.prompt).toContain(".autopilot/gate-1-e2e.md");
+    expect(fix?.prompt).toContain(".autopilot/inbox-1.md");
+  });
+});
+
+describe("修正担当が commit せずに変更を残すと、未 commit の作業ツリーがゲートに合格して done になった", () => {
+  test("HEAD が変わらず作業ツリーだけ変わったら、ゲートへ進まず needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      review: () => VERDICT.none,
+      gates: [{ name: "e2e" }],
+      dirtyOnSuccess: (_inv, kind) => kind === "fix",
+    });
+    const cfg = pipelineConfig(assignee("claude"), [assignee("agy")]);
+    const run = h.deps.runAgent;
+    h.deps.runAgent = async (inv, prompt, opts) => {
+      const result = await run(inv, prompt, opts);
+      if (opts?.output === "gate-1-e2e.md") h.deps.state.write("inbox.md", "追加指示");
+      return result;
+    };
+    expect(await runPipeline({ ...cfg, from: "gate" }, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "修正担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
+    });
+    expect(h.calls.filter((c) => c.output?.startsWith("gate-"))).toHaveLength(1);
+  });
+});
+
+describe("長いゲート名の URL 符号化で保存先が ENAMETOOLONG になった", () => {
+  test("日本語・ASCII の長い名前と短縮後の衝突でも全手順書・結果を保存できる", async () => {
+    const repo = tempRepo();
+    try {
+      const paths = [
+        `.agents/autopilot-gate-${"日".repeat(30)}.md`,
+        `.agents/autopilot-gate-${"日".repeat(29)}本.md`,
+        `.agents/autopilot-gate-${"x".repeat(200)}.md`,
+      ];
+      paths.push(`.agents/autopilot-gate-${gateNameFromPath(paths[2]!)}.md`);
+      mkdirSync(join(repo.work, ".agents"));
+      paths.forEach((path, i) => {
+        writeFileSync(join(repo.work, path), `手順 ${i}`);
+      });
+      git(repo.work, "add", ".agents");
+      git(repo.work, "commit", "-qm", "long gate names");
+      const gates = await findGateFiles(repo.work, "HEAD");
+      expect(gates).toHaveLength(paths.length);
+      expect(gates.some((g) => g.name.endsWith("-2"))).toBe(true);
+      expect(new Set(gates.map((g) => g.name)).size).toBe(paths.length);
+      expect(await findGateFiles(repo.work, "HEAD")).toEqual(gates);
+      const state = new State(repo.work);
+      for (const gate of gates) {
+        for (const name of [`gate-src-${gate.name}.md`, `gate-10-${gate.name}.md`]) {
+          expect(Buffer.byteLength(name)).toBeLessThanOrEqual(255);
+          state.write(name, gate.content);
+          expect(state.read(name)).toBe(gate.content);
+        }
+      }
+    } finally {
+      repo.cleanup();
+    }
+  });
+});
+
+describe("レビューの前置きの行のせいで、must なしの判定を must ありと読み、要らない修正の周に入った（PR #13 の 2 周目）", () => {
+  // 最初の空でない行だけを読んでいたので、判定の前に 1 行書かれると判定を読めなかった。
+  const preface = "ゲート周りの分岐を一通り追い終えた。結果をまとめる。";
+
+  test("レビューは前置きの後の「判定:」の行を読む", () => {
+    const actual = `${preface}\n\n判定: must なし\n- nit: x\n\n確かめたこと: y`;
+    expect(prompts.reviewHasMust(actual)).toBe(false);
+  });
+
+  test("ゲートも前置きの後の「判定:」の行を読み、needs-human にしない", () => {
+    const actual = `${preface}\n\n判定: 合格\n手順をすべて実行した。`;
+    expect(prompts.parseGateVerdict(actual)).toBe("pass");
+  });
+});
+
+describe("修正担当が一部だけ commit して残りを作業ツリーに置くと、HEAD が変わったので素通りし、未 commit の変更込みでゲートに合格して done になりえた", () => {
+  test("HEAD が変わっても、修正担当の後に未 commit のファイルがあれば次の周へ進まず needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [true],
+      review: () => VERDICT.none,
+      gates: [{ name: "e2e" }],
+      gate: (round) => (round === 1 ? prompts.GATE_VERDICT.fail : prompts.GATE_VERDICT.pass),
+      dirtyOnSuccess: (_inv, kind) => kind === "fix",
+    });
+    const cfg = pipelineConfig(assignee("claude"), [assignee("agy")]);
+    expect(await runPipeline({ ...cfg, from: "gate" }, h.deps)).toEqual({
+      kind: "needs-human",
+      reason: "修正担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
+    });
+    expect(h.calls.map((c) => c.kind)).toEqual(["gate", "fix", "summarize"]);
+  });
+});
+
+describe("前置きで前回の判定を引用すると、引用した判定を読んで must を見落としうる", () => {
+  test("引用でない判定の行を先に読む", () => {
+    const actual = `前回の結果:\n> 判定: must なし\n\n判定: must あり\n- must: 直す`;
+    expect(prompts.reviewHasMust(actual)).toBe(true);
+    expect(
+      prompts.parseGateVerdict(`> ${prompts.GATE_VERDICT.pass}\n\n${prompts.GATE_VERDICT.fail}`),
+    ).toBe("fail");
+  });
+
+  test("引用の判定しか無ければ、それを読む", () => {
+    expect(prompts.reviewHasMust(`> ${VERDICT.none}`)).toBe(false);
   });
 });

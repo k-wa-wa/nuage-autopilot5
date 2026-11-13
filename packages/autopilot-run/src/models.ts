@@ -26,11 +26,12 @@ export type Level = (typeof LEVELS)[number];
 /** 実装と修正の賢さの既定。仕事の難しさは窓口が会話から分かるので、--level で変えられる。 */
 export const DEFAULT_LEVEL: Level = "high";
 
-/** 実装・修正以外の作業の賢さ。レビューは見落としが一番高くつき、要約は差分とログをまとめるだけ。 */
-const FIXED_LEVELS = { review: "high", summarize: "light" } as const satisfies Record<
-  string,
-  Level
->;
+/** 実装・修正以外の作業の賢さ。レビュー・ゲートは見落としが一番高くつき、要約は差分とログをまとめるだけ。 */
+const FIXED_LEVELS = {
+  review: "high",
+  gate: "high",
+  summarize: "light",
+} as const satisfies Record<string, Level>;
 
 export const MODELS_PATH = "/etc/autopilot5/models.yaml";
 
@@ -135,6 +136,7 @@ export interface Assignment {
   fix: Assignee;
   summarize: Assignee;
   reviewers: ReviewerAssignee[];
+  gate: Assignee;
 }
 
 /** 観点ごとに試す担当の並びを決める。i 番目から始め、残りは並びの順に試す。 */
@@ -165,6 +167,7 @@ export function assignRoles(
   const implement = opts.impl ? as(opts.impl, opts.level) : configured("impl", opts.level);
 
   let reviewers: ReviewerAssignee[];
+  let gate: Assignee;
   if (opts.reviewers && opts.reviewers.length > 0) {
     reviewers = REVIEW_PERSPECTIVES.map((p, i) => {
       const spec = opts.reviewers![i % opts.reviewers!.length]!;
@@ -174,6 +177,11 @@ export function assignRoles(
         chain: resolveChain(spec, FIXED_LEVELS.review, table),
       };
     });
+    const gateSpec = opts.reviewers[0]!;
+    gate = {
+      name: formatAgentSpec(gateSpec),
+      chain: resolveChain(gateSpec, FIXED_LEVELS.gate, table),
+    };
   } else {
     const configuredAgents = table.roles?.review ?? DEFAULT_ROLES.review;
     reviewers = REVIEW_PERSPECTIVES.map((p, i) => {
@@ -186,6 +194,12 @@ export function assignRoles(
         ),
       };
     });
+    gate = {
+      name: configuredAgents[0]!,
+      chain: configuredAgents.flatMap((agent) =>
+        resolveChain({ agent, models: [] }, FIXED_LEVELS.gate, table),
+      ),
+    };
   }
 
   return {
@@ -195,6 +209,7 @@ export function assignRoles(
       ? as(opts.impl, FIXED_LEVELS.summarize)
       : configured("impl", FIXED_LEVELS.summarize),
     reviewers,
+    gate,
   };
 }
 
