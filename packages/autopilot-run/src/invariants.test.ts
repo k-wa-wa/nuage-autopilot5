@@ -55,7 +55,7 @@ describe("禁止事項はすべての自律ターンに届く", () => {
   const autonomous = {
     implement: prompts.implement("pr"),
     fix: prompts.fix({ mode: "pr", scope: "must-should", reviews: [], ciLog: null, inbox: null }),
-    summarize: prompts.summarize("abc", 7),
+    summarize: prompts.summarize("abc", 7, "done"),
     gate: prompts.gate({
       name: "default",
       sourcePath: ".autopilot/gate-src-default.md",

@@ -871,6 +871,10 @@ describe("runPipeline: 担当の後に作業ツリーが綺麗かを確かめる
     });
     expect(h.calls.map((c) => c.kind)).toEqual(["implement", "summarize"]);
     expect(h.calls.at(-1)?.prompt).toContain("PR #7");
+    // 理由は run.log と status にしか無いので、要約担当にはプロンプトで渡す。
+    expect(h.calls.at(-1)?.prompt).toContain(
+      "今回の結果は「needs-human: 実装担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt」",
+    );
   });
 
   test("実装担当がファイルを残し PR も作らなかったときも、残ったファイルを理由にする", async () => {

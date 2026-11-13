@@ -217,7 +217,7 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
     !(
       await runner.run(
         cfg.summarize,
-        prompts.summarize(cfg.baseSha, pr, Array.from(missingPerspectives)),
+        prompts.summarize(cfg.baseSha, pr, formatOutcome(outcome), Array.from(missingPerspectives)),
         { writes: false },
       )
     ).ok
