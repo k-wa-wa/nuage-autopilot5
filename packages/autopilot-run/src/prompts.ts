@@ -193,6 +193,7 @@ export function fix(input: FixInput): string {
       : "レビューの must だけを直す。should と nit は直さない。";
   return `${RULES}
 
+.autopilot/brief.md の仕様を読み、仕様に照らして直す（実装の会話の続きでないときも、仕様を知ったうえで判断するため）。
 次のファイルを読み、直すべきものを直す。
 ${items.map((i) => `- ${i}`).join("\n")}
 

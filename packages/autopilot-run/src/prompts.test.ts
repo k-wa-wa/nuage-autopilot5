@@ -170,6 +170,10 @@ describe("プロンプト", () => {
     );
   });
 
+  test("修正は brief.md の仕様を読ませる（--from review / gate では実装の会話が無い）", () => {
+    expect(all.fix).toContain(".autopilot/brief.md の仕様を読み");
+  });
+
   test("修正は、変更しないことを失敗と思わせない", () => {
     expect(all.fix).toContain("変更しないことは失敗ではない");
   });
