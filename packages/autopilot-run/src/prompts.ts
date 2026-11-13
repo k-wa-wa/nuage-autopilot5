@@ -207,9 +207,14 @@ must を見送るときは、理由を .autopilot/decisions.md に書く。
 直すものが無ければ何も変更しない。変更しないことは失敗ではない。`;
 }
 
+/**
+ * 要約のプロンプト。outcome は autopilot が決めた終わり方（status に書くもの）。
+ * 理由が run.log にしか無い needs-human（CI が終わらない・上限に達した・未 commit のファイルなど）も要約に渡す。
+ */
 export function summarize(
   baseSha: string,
   pr: number | null,
+  outcome: string,
   missingPerspectives: readonly string[] = [],
 ): string {
   const missing =
@@ -219,6 +224,7 @@ export function summarize(
   return `${RULES}
 
 .autopilot/brief.md・decisions.md・review-*.md・gate-*.md・needs-human.md（存在する場合）と \`git log ${baseSha}..HEAD\` を元に、人間向けの要約を .autopilot/result.md に書く。
+今回の結果は「${outcome}」である（autopilot が決めた。needs-human ならその理由を「人間の判断が必要なこと」に必ず書く）。
 内容: 何をしたか / 主な判断とその理由 / 見送った指摘 / 人間の判断が必要なこと。needs-human.md の理由や、ゲートの判定不能・実行失敗なども確認し、判断が必要なことが無ければ「なし」と書く。短く。
 レビュー結果について、観点ごとの担当（CLI・モデル）、観点ごとの must / should の件数、片方の観点しか挙げなかった must、欠けた観点があればその旨を書く。${missing}
 gate-src-*.md は手順書なので結果と混同しない。run.log と照合して今回の実行の結果だけを扱う。

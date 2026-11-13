@@ -19,7 +19,7 @@ const all = {
     ciLog: null,
     inbox: null,
   }),
-  summarize: prompts.summarize("abc123", 7),
+  summarize: prompts.summarize("abc123", 7, "done"),
 };
 
 describe("プロンプト", () => {
@@ -135,8 +135,8 @@ describe("プロンプト", () => {
   });
 
   test("要約は PR があるときだけ PR 本文も更新させ、観点ごとの担当・件数・欠けた観点を書かせる", () => {
-    expect(prompts.summarize("abc", 7)).toContain("PR #7 の本文");
-    expect(prompts.summarize("abc", null)).not.toContain("PR #");
+    expect(prompts.summarize("abc", 7, "done")).toContain("PR #7 の本文");
+    expect(prompts.summarize("abc", null, "done")).not.toContain("PR #");
     expect(all.summarize).toContain("観点ごとの担当（CLI・モデル）");
     expect(all.summarize).toContain("観点ごとの must / should の件数");
     expect(all.summarize).toContain("片方の観点しか挙げなかった must");
@@ -146,8 +146,14 @@ describe("プロンプト", () => {
     expect(all.summarize).toContain("ゲートごとの判定と担当（CLI・モデル）");
     expect(all.summarize).toContain("対象外・判定不能もその旨を書く");
 
-    const withMissing = prompts.summarize("abc", null, ["free"]);
+    const withMissing = prompts.summarize("abc", null, "done", ["free"]);
     expect(withMissing).toContain("全候補が失敗してレビューが欠けた観点: free");
+  });
+
+  test("要約に終わり方と理由を渡し、needs-human の理由を人間に渡させる", () => {
+    const p = prompts.summarize("abc", 7, "needs-human: CI が終わらない");
+    expect(p).toContain("今回の結果は「needs-human: CI が終わらない」");
+    expect(p).toContain("needs-human ならその理由を「人間の判断が必要なこと」に必ず書く");
   });
 
   test("2 周目以降のレビューは、前回レビューした HEAD からの修正を示す", () => {
