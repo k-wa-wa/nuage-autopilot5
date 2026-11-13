@@ -53,7 +53,7 @@ const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--
   AGENT        ${AGENTS.join(" | ")}（通常: 実装 agy、レビューは自由 claude・網羅 codex）。
                モデルは models.yaml の並びを使う。決め打ちするときは AGENT:MODEL@EFFORT/MODEL と書く（/ の順に試す）
   --reviewers  レビュー担当（省略時は観点ごとに models.yaml の roles.review の順）
-  --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューは high、要約は light で固定
+  --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューとゲートは high、要約は light で固定
   --max-rounds 修正ループの上限（1〜10、既定: 3）
   --local      push・PR・CI を行わず、ローカルの差分だけで回す（試運転用）
   --from       どこから始めるか。${START_POINTS.join(" | ")}（既定: implement）。

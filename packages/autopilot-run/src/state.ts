@@ -20,8 +20,10 @@ import { join } from "node:path";
  *   run.pid       実行中のプロセス
  *   decisions.md  実装担当が書く。判断とその理由
  *   needs-human.md 修正担当が書く。コードで片付かず人間に返す理由
- *   gate-*.md     ゲート検証担当が書く。手順の実行結果と合否
- *   result.md     最後に実装担当が書く。人間向けの要約
+ *   review-N-<観点>.md  レビュー担当が書く。N 周目の観点（free / coverage）ごとの指摘と判定
+ *   gate-src-<名前>.md  autopilot が基点から取り出したゲートの手順書
+ *   gate-N-<名前>.md  ゲート検証担当が書く。N 周目の手順の実行結果と合否
+ *   result.md     最後に要約担当が書く。人間向けの要約
  */
 
 export const STATE_DIR = ".autopilot";
