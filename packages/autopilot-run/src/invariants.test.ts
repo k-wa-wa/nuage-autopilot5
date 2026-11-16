@@ -54,6 +54,11 @@ describe("責務が 1 箇所に閉じている", () => {
 describe("禁止事項はすべての自律ターンに届く", () => {
   const autonomous = {
     spec: prompts.spec({ requestPath: ".autopilot/request.md", specPath: ".autopilot/spec.md" }),
+    specFix: prompts.specFix({
+      specPath: ".autopilot/spec.md",
+      requestPath: ".autopilot/request.md",
+      reviews: [],
+    }),
     implement: prompts.implement("pr", ".autopilot/request.md"),
     fix: prompts.fix({
       mode: "pr",

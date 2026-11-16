@@ -683,3 +683,79 @@ describe("リポジトリゲートの E2E", () => {
     TIMEOUT,
   );
 });
+
+describe("仕様検討の E2E (--from spec)", () => {
+  test(
+    "仕様検討（退避・検討・仕様レビュー・確定）を経て実装・レビュー・要約まで完走する",
+    async () => {
+      setup();
+      // 前回の spec.md を配置して退避を検証する
+      writeFileSync(join(env.dir, "spec.md"), "# 前回の仕様\n");
+
+      env.world.scripts({
+        claude: {
+          spec: ["spec"],
+          implement: ["commit"],
+          fix: [],
+          summarize: ["result"],
+        },
+        agy: {
+          specReview: ["say:判定: must なし\n問題なし"],
+          review: ["say:判定: must なし\n確かめたこと: 差分"],
+        },
+      });
+
+      const r = await main(["--local", "--from", "spec"]);
+      expect(r.code).toBe(0);
+      expect(status()).toBe("done");
+
+      // spec.md が spec-prev.md に退避され、新しい spec.md が作成されている
+      expect(read("spec-prev.md")).toBe("# 前回の仕様\n");
+      expect(read("spec.md")).toContain("# 仕様\n実装する");
+
+      // 呼び出し順序の検証: spec → specReview → implement → review → fix → summarize
+      const calls = env.world.calls().map((c) => `${c.name}:${c.kind}`);
+      expect(calls).toEqual([
+        "claude:spec",
+        "agy:specReview",
+        "claude:implement",
+        "agy:review",
+        "claude:fix",
+        "claude:summarize",
+      ]);
+      expect(read("run.log")).toContain("仕様を確定した");
+      expect(read("result.md")).toBe("要約\n");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "仕様検討で仕様レビューが全員失敗した場合、PR なしで要約を作成して終了する",
+    async () => {
+      setup();
+      env.world.scripts({
+        claude: {
+          spec: ["spec"],
+          summarize: ["result"],
+        },
+        agy: {
+          specReview: ["fail"],
+        },
+      });
+
+      const r = await main(["--local", "--from", "spec"]);
+      expect(r.code).toBe(0);
+      expect(status()).toContain("needs-human: 仕様レビュー担当が全員失敗した");
+
+      // 実装担当は起動されず、PR も作られず、要約担当のみが起動される
+      const calls = env.world.calls().map((c) => `${c.name}:${c.kind}`);
+      expect(calls).toEqual(["claude:spec", "agy:specReview", "claude:summarize"]);
+      expect(read("result.md")).toBe("要約\n");
+
+      // 要約担当に未確定の spec.md が渡っていること
+      const sumCall = env.world.calls().find((c) => c.kind === "summarize")!;
+      expect(sumCall.prompt).toContain(".autopilot/spec.md");
+    },
+    TIMEOUT,
+  );
+});

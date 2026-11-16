@@ -107,6 +107,7 @@ describe("プロンプト", () => {
       requestPath: ".autopilot/request.md",
       reviews: [".autopilot/spec-review-1-claude.md"],
     });
+    expect(p).toContain("人間は不在なので質問しない");
     expect(p).toContain("あなたは仕様検討の担当である");
     expect(p).toContain("コードは一切変更しない");
     expect(p).toContain(".autopilot/spec.md の must と should を直す。nit は直さなくてよい");
@@ -191,6 +192,9 @@ describe("プロンプト", () => {
   test("要約は PR があるときだけ PR 本文も更新させ、担当・件数・主な指摘を書かせる", () => {
     expect(prompts.summarize("abc", 7, "done", ".autopilot/request.md")).toContain("PR #7 の本文");
     expect(prompts.summarize("abc", null, "done", ".autopilot/request.md")).not.toContain("PR #");
+    expect(all.summarize).toContain("仕様の要点");
+    expect(all.summarize).toContain("仕様レビューとコードレビューそれぞれの担当（CLI・モデル）");
+    expect(all.summarize).toContain("判定（must あり / なし）");
     expect(all.summarize).toContain("担当（CLI・モデル）");
     expect(all.summarize).toContain("must / should の件数");
     expect(all.summarize).toContain("主な指摘");

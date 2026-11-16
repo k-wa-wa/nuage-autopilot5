@@ -105,15 +105,57 @@ export function formatOutcome(o: Outcome): string {
 }
 
 /** レビュー結果のファイル名。 */
-export function reviewFileName(reviewer: Assignee, round: number): string {
+export function reviewFileName(reviewer: Assignee, round: number, index?: number): string {
   const slug = reviewer.name.replace(/[^A-Za-z0-9._-]+/g, "-");
-  return `review-${round}-${slug}.md`;
+  return index !== undefined ? `review-${round}-${slug}-${index}.md` : `review-${round}-${slug}.md`;
 }
 
 /** 仕様レビュー結果のファイル名。 */
-export function specReviewFileName(reviewer: Assignee, round: number): string {
+export function specReviewFileName(reviewer: Assignee, round: number, index?: number): string {
   const slug = reviewer.name.replace(/[^A-Za-z0-9._-]+/g, "-");
-  return `spec-review-${round}-${slug}.md`;
+  return index !== undefined
+    ? `spec-review-${round}-${slug}-${index}.md`
+    : `spec-review-${round}-${slug}.md`;
+}
+
+/** 担当名が重複してもファイル名が衝突しないよう、一意なレビューファイル名を割り当てる。 */
+export function reviewFileNames(reviewers: Assignee[], round: number): string[] {
+  const counts = new Map<string, number>();
+  for (const r of reviewers) {
+    const slug = r.name.replace(/[^A-Za-z0-9._-]+/g, "-");
+    counts.set(slug, (counts.get(slug) ?? 0) + 1);
+  }
+  const seen = new Map<string, number>();
+  return reviewers.map((r) => {
+    const slug = r.name.replace(/[^A-Za-z0-9._-]+/g, "-");
+    const count = counts.get(slug) ?? 1;
+    if (count > 1) {
+      const idx = (seen.get(slug) ?? 0) + 1;
+      seen.set(slug, idx);
+      return reviewFileName(r, round, idx);
+    }
+    return reviewFileName(r, round);
+  });
+}
+
+/** 担当名が重複してもファイル名が衝突しないよう、一意な仕様レビューファイル名を割り当てる。 */
+export function specReviewFileNames(reviewers: Assignee[], round: number): string[] {
+  const counts = new Map<string, number>();
+  for (const r of reviewers) {
+    const slug = r.name.replace(/[^A-Za-z0-9._-]+/g, "-");
+    counts.set(slug, (counts.get(slug) ?? 0) + 1);
+  }
+  const seen = new Map<string, number>();
+  return reviewers.map((r) => {
+    const slug = r.name.replace(/[^A-Za-z0-9._-]+/g, "-");
+    const count = counts.get(slug) ?? 1;
+    if (count > 1) {
+      const idx = (seen.get(slug) ?? 0) + 1;
+      seen.set(slug, idx);
+      return specReviewFileName(r, round, idx);
+    }
+    return specReviewFileName(r, round);
+  });
 }
 
 /** 担当を、モデルの並びの前から順に試す。 */
@@ -193,11 +235,19 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
     if (specRes.kind !== "done") {
       if (specRes.outcome.kind === "needs-human") {
         d.state.stage("summarizing");
-        await runner.run(
-          cfg.summarize,
-          prompts.summarize(cfg.baseSha, null, formatOutcome(specRes.outcome), specPath),
-          { writes: false },
-        );
+        // 検討担当が spec.md を書いていれば（未確定でも仕様案として）渡す
+        const summarySpecPath = d.state.read("spec.md")?.trim() ? d.state.rel("spec.md") : specPath;
+        if (
+          !(
+            await runner.run(
+              cfg.summarize,
+              prompts.summarize(cfg.baseSha, null, formatOutcome(specRes.outcome), summarySpecPath),
+              { writes: false },
+            )
+          ).ok
+        ) {
+          d.state.log("要約担当が異常終了した");
+        }
       }
       return specRes.outcome;
     }
@@ -260,10 +310,18 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
 type SpecPhaseResult = { kind: "done" } | { kind: "abort"; outcome: Outcome };
 
 async function runSpecPhase(cfg: Config, d: Deps, runner: Runner): Promise<SpecPhaseResult> {
-  // 1. 前回の spec.md があれば spec-prev.md に移す
+  // 0. 起動時に未 commit のファイルがあれば、検討担当を呼ぶ前に needs-human
+  const initialLeftover = await leftoverReason(d, "仕様検討の開始前");
+  if (initialLeftover) {
+    return { kind: "abort", outcome: { kind: "needs-human", reason: initialLeftover } };
+  }
+
+  // 1. 前回の spec.md があれば spec-prev.md に移す（前々回からの spec-prev.md があればそれも下書きにする）
   let prevSpecPath: string | null = null;
   if (d.state.read("spec.md") !== null) {
     d.state.rename("spec.md", "spec-prev.md");
+    prevSpecPath = d.state.rel("spec-prev.md");
+  } else if (d.state.read("spec-prev.md") !== null) {
     prevSpecPath = d.state.rel("spec-prev.md");
   }
 
@@ -329,6 +387,9 @@ async function runSpecPhase(cfg: Config, d: Deps, runner: Runner): Promise<SpecP
         requestPath: d.state.rel("request.md"),
         reviews: reviews.map((name) => d.state.rel(name)),
       });
+      if (!specSession) {
+        d.state.log("検討担当の会話 ID が読めないため、新しい会話で始める");
+      }
       const plan: SessionPlan = specSession
         ? { kind: "resume", id: specSession }
         : { kind: "start" };
@@ -557,9 +618,10 @@ async function review(
   since: string | null,
   specPath: string,
 ): Promise<string[]> {
+  const names = reviewFileNames(cfg.reviewers, round);
   const results = await Promise.all(
-    cfg.reviewers.map(async (rv) => {
-      const name = reviewFileName(rv, round);
+    cfg.reviewers.map(async (rv, i) => {
+      const name = names[i]!;
       // レビュー担当はファイルを書き換えないので、失敗したら常に次のモデルで試し直す。
       const r = await runner.run(rv, prompts.review({ baseSha: cfg.baseSha, since, specPath }), {
         writes: false,
@@ -587,9 +649,10 @@ async function specReview(
   specPath: string,
   requestPath: string,
 ): Promise<string[]> {
+  const names = specReviewFileNames(cfg.reviewers, round);
   const results = await Promise.all(
-    cfg.reviewers.map(async (rv) => {
-      const name = specReviewFileName(rv, round);
+    cfg.reviewers.map(async (rv, i) => {
+      const name = names[i]!;
       const r = await runner.run(rv, prompts.specReview({ specPath, requestPath }), {
         writes: false,
         output: name,

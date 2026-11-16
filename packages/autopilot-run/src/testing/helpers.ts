@@ -128,12 +128,16 @@ export interface HarnessOptions {
   gate?: (round: number, gateName: string) => string;
   /** 会話 ID を返さないエージェント（出力を読めなかったとき）。 */
   noSession?: boolean;
+  /** 特定の呼び出しで会話 ID を返さないようにする述語。 */
+  omitSession?: (inv: Invocation, kind: PromptKind) => boolean;
+  /** 開始時の未 commit ファイル数。 */
+  initialDirty?: number;
 }
 
 /** エージェント・git・GitHub・時計をすべて偽物にした pipeline の依存。 */
 export function pipelineHarness(opts: HarnessOptions) {
   let head = opts.startHead ?? 0;
-  let dirty = 0;
+  let dirty = opts.initialDirty ?? 0;
   let now = 0;
   const calls: {
     inv: Invocation;
@@ -192,7 +196,7 @@ export function pipelineHarness(opts: HarnessOptions) {
         : session.kind === "resume"
           ? session.id
           : `conv${++conversations}`;
-      return { ok: true, session: opts.noSession ? null : id };
+      return { ok: true, session: opts.noSession || opts.omitSession?.(inv, kind) ? null : id };
     },
     head: async () => `sha${head}`,
     fingerprint: async () => `sha${head}+${dirty}`,
@@ -379,6 +383,7 @@ export type Action =
   | "push"
   | "pr"
   | "result"
+  | "spec"
   | "fail"
   | "unavailable"
   | "hang"
@@ -439,6 +444,7 @@ for (const a of actions) {
   } else if (a === "push") sh("git", "push", "-q", "origin", "HEAD");
   else if (a === "pr") sh("gh", "pr", "create", "--fill");
   else if (a === "result") writeFileSync(".autopilot/result.md", "要約\\n");
+  else if (a === "spec") writeFileSync(".autopilot/spec.md", "# 仕様\\n実装する\\n");
   else if (a === "fail") process.exit(3);
   else if (a === "unavailable") { console.error("Rate limit exceeded"); process.exit(3); }
   else if (a.startsWith("fail-if-model:")) {

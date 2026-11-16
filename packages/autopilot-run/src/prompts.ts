@@ -76,7 +76,9 @@ export interface SpecFixInput {
 }
 
 export function specFix(input: SpecFixInput): string {
-  return `あなたは仕様検討の担当である。コードは一切変更しない。
+  return `${AUTONOMOUS_RULES}
+
+あなたは仕様検討の担当である。コードは一切変更しない。
 仕様レビュー結果を読み、${input.specPath} の must と should を直す。nit は直さなくてよい。
 仕様レビュー結果: ${input.reviews.join(", ")}
 ${input.requestPath} の「合意した仕様」は変えない。
@@ -261,8 +263,9 @@ export function summarize(
 
 ${specPath}・decisions.md・review-*.md・gate-*.md・spec-review-*.md・needs-human.md（存在する場合）と \`git log ${baseSha}..HEAD\` を元に、人間向けの要約を .autopilot/result.md に書く。
 今回の結果は「${outcome}」である（autopilot が決めた。needs-human ならその理由を「人間の判断が必要なこと」に必ず書き、選択肢と推奨を添える）。
-内容: 何をしたか / 主な判断とその理由 / 見送った指摘 / 人間の判断が必要なこと。needs-human.md の理由や、ゲートの判定不能・実行失敗なども確認し、判断が必要なことが無ければ「なし」と書く。短く。
-レビュー結果について、担当（CLI・モデル）、must / should の件数、主な指摘を書く。
+内容: 仕様の要点 / 何をしたか / 主な判断とその理由 / 見送った指摘 / 人間の判断が必要なこと。needs-human.md の理由や、ゲートの判定不能・実行失敗なども確認し、判断が必要なことが無ければ「なし」と書く。短く。
+仕様の要点として、依頼および ${specPath} から何を実現したか（仕様未確定の場合はその旨と仕様案の要点）を書く。
+レビュー結果について、仕様レビューとコードレビューそれぞれの担当（CLI・モデル）、判定（must あり / なし）、must / should の件数、主な指摘を書く。
 gate-src-*.md は手順書なので結果と混同しない。run.log と照合して今回の実行の結果だけを扱う。
 ゲート結果について、ゲートごとの判定と担当（CLI・モデル）を書く（対象外・判定不能もその旨を書く）。${
     pr ? `\nPR #${pr} の本文も同じ内容で gh pr edit --body により更新する。` : ""

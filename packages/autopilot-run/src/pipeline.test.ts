@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { CI_LIMITS } from "./ci.ts";
 import { assignRoles } from "./models.ts";
-import { reviewFileName, runPipeline, specReviewFileName } from "./pipeline.ts";
+import {
+  reviewFileName,
+  reviewFileNames,
+  runPipeline,
+  specReviewFileName,
+  specReviewFileNames,
+} from "./pipeline.ts";
 import { GATE_VERDICT, VERDICT } from "./prompts.ts";
 import { assignee, checks, pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
@@ -1110,5 +1116,60 @@ describe("runPipeline: 仕様検討（--from spec）", () => {
     expect(impl.prompt).not.toContain(".autopilot/spec.md");
     const fix = h.calls.find((c) => c.kind === "fix")!;
     expect(fix.prompt).toContain(".autopilot/request.md の仕様を読み");
+  });
+
+  test("重複するレビュー担当名があっても一意なファイル名を割り当てる", () => {
+    const rvs = [assignee("claude"), assignee("claude")];
+    const names = reviewFileNames(rvs, 1);
+    expect(names).toEqual(["review-1-claude-1.md", "review-1-claude-2.md"]);
+    const specNames = specReviewFileNames(rvs, 2);
+    expect(specNames).toEqual(["spec-review-2-claude-1.md", "spec-review-2-claude-2.md"]);
+  });
+
+  test("仕様検討開始前に未 commit のファイルがあれば検討担当を起動せず needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      initialDirty: 1,
+    });
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome.kind).toBe("needs-human");
+    if (outcome.kind === "needs-human") {
+      expect(outcome.reason).toContain(
+        "仕様検討の開始前、作業ツリーに未 commit のファイルが残っている",
+      );
+    }
+    expect(h.calls.some((c) => c.kind === "spec")).toBe(false);
+  });
+
+  test("前回の spec.md がなく spec-prev.md だけがある場合も下書きとして引き継ぐ", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      initialFiles: { "spec-prev.md": "# 過去の下書き" },
+    });
+    expect(await runPipeline(specCfg, h.deps)).toEqual({ kind: "done" });
+    const specCall = h.calls.find((c) => c.kind === "spec")!;
+    expect(specCall.prompt).toContain(".autopilot/spec-prev.md があれば下書きとして参考にしてよい");
+  });
+
+  test("仕様修正で会話 ID が読めなければ新しい会話で始めログに残す", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      specReview: (round) => (round === 1 ? VERDICT.must : VERDICT.none),
+      omitSession: (_, k) => k === "spec",
+    });
+    expect(await runPipeline(specCfg, h.deps)).toEqual({ kind: "done" });
+    expect(h.logs).toContain("検討担当の会話 ID が読めないため、新しい会話で始める");
+  });
+
+  test("仕様検討で needs-human 時、書かれた spec.md が要約プロンプトに渡り、要約失敗ログが残る", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      failAgent: (_, k) => k === "specReview" || k === "summarize",
+    });
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome.kind).toBe("needs-human");
+    const summarizeCall = h.calls.find((c) => c.kind === "summarize")!;
+    expect(summarizeCall.prompt).toContain(".autopilot/spec.md");
+    expect(h.logs).toContain("要約担当が異常終了した");
   });
 });
