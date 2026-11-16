@@ -1210,4 +1210,22 @@ describe("runPipeline: 仕様検討（--from spec）", () => {
       "PR #15 の本文も同じ内容で gh pr edit --body により更新する",
     );
   });
+
+  test("仕様検討で needs-human 時、PR 番号の取得で例外が起きても failed にならず pr=null で要約が作成される", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      failAgent: (_, k) => k === "specReview",
+      github: { pr: 15 },
+    });
+    h.deps.github!.prNumber = async () => {
+      throw new Error("GitHub 通信エラー");
+    };
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome.kind).toBe("needs-human");
+    const summarizeCall = h.calls.find((c) => c.kind === "summarize")!;
+    expect(summarizeCall.prompt).not.toContain("gh pr edit --body");
+    expect(h.logs).toContain(
+      "PR 番号の取得に失敗した (GitHub 通信エラー)。PR 本文の更新は行わず要約を作成する",
+    );
+  });
 });

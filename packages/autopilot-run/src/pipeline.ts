@@ -234,8 +234,14 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
         const summarySpecPath = specRes.writtenSpec ? d.state.rel("spec.md") : specPath;
         let pr: number | null = null;
         if (d.github) {
-          pr = await d.github.prNumber();
-          if (pr !== null) d.state.log(`PR #${pr}`);
+          try {
+            pr = await d.github.prNumber();
+            if (pr !== null) d.state.log(`PR #${pr}`);
+          } catch (e) {
+            d.state.log(
+              `PR 番号の取得に失敗した (${e instanceof Error ? e.message : String(e)})。PR 本文の更新は行わず要約を作成する`,
+            );
+          }
         }
         if (
           !(
