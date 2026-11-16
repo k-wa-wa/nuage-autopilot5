@@ -5,6 +5,7 @@ import {
   reviewFileName,
   reviewFileNames,
   runPipeline,
+  safeAssigneeSlug,
   specReviewFileName,
   specReviewFileNames,
 } from "./pipeline.ts";
@@ -1118,18 +1119,34 @@ describe("runPipeline: 仕様検討（--from spec）", () => {
     expect(fix.prompt).toContain(".autopilot/request.md の仕様を読み");
   });
 
-  test("重複するレビュー担当名があっても一意なファイル名を割り当てる", () => {
-    const rvs = [assignee("claude"), assignee("claude")];
+  test("重複するレビュー担当名や連番風の担当名があっても一意なファイル名を割り当てる", () => {
+    const rvs = [
+      assignee("claude", "MODEL"),
+      assignee("claude", "MODEL"),
+      assignee("claude", "MODEL-2"),
+    ];
     const names = reviewFileNames(rvs, 1);
-    expect(names).toEqual(["review-1-claude-1.md", "review-1-claude-2.md"]);
+    expect(new Set(names).size).toBe(3);
+    expect(names[0]).toBe("review-1-claude-MODEL.md");
+    expect(names[1]).toBe("review-1-claude-MODEL-2.md");
+    expect(names[2]).toBe("review-1-claude-MODEL-2-2.md");
+
     const specNames = specReviewFileNames(rvs, 2);
-    expect(specNames).toEqual(["spec-review-2-claude-1.md", "spec-review-2-claude-2.md"]);
+    expect(new Set(specNames).size).toBe(3);
   });
 
-  test("仕様検討開始前に未 commit のファイルがあれば検討担当を起動せず needs-human", async () => {
+  test("safeAssigneeSlug: 長いモデル指定でも安全な長さに短縮する", () => {
+    const longName = `claude:${"m".repeat(300)}`;
+    const slug = safeAssigneeSlug(longName);
+    expect(slug.length).toBeLessThanOrEqual(60);
+    expect(slug).toMatch(/^claude-m+-/);
+  });
+
+  test("仕様検討開始前に未 commit のファイルがあれば検討担当を起動せず needs-human。古い spec.md があっても要約には渡さない", async () => {
     const h = pipelineHarness({
       commits: [],
       initialDirty: 1,
+      initialFiles: { "spec.md": "# 前回の古い仕様" },
     });
     const outcome = await runPipeline(specCfg, h.deps);
     expect(outcome.kind).toBe("needs-human");
@@ -1139,6 +1156,13 @@ describe("runPipeline: 仕様検討（--from spec）", () => {
       );
     }
     expect(h.calls.some((c) => c.kind === "spec")).toBe(false);
+    // 古い spec.md ではなく request.md が要約に渡る
+    const summarizeCall = h.calls.find((c) => c.kind === "summarize")!;
+    expect(summarizeCall.prompt).toContain(".autopilot/request.md");
+    expect(summarizeCall.prompt).not.toContain(".autopilot/spec.md");
+    // 前回の spec.md は退避されている
+    expect(h.deps.state.read("spec.md")).toBeNull();
+    expect(h.deps.state.read("spec-prev.md")).toBe("# 前回の古い仕様");
   });
 
   test("前回の spec.md がなく spec-prev.md だけがある場合も下書きとして引き継ぐ", async () => {
@@ -1171,5 +1195,19 @@ describe("runPipeline: 仕様検討（--from spec）", () => {
     const summarizeCall = h.calls.find((c) => c.kind === "summarize")!;
     expect(summarizeCall.prompt).toContain(".autopilot/spec.md");
     expect(h.logs).toContain("要約担当が異常終了した");
+  });
+
+  test("仕様検討で needs-human 時、既存 PR があれば PR 番号と更新指示が要約に渡る", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      failAgent: (_, k) => k === "specReview",
+      github: { pr: 15 },
+    });
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome.kind).toBe("needs-human");
+    const summarizeCall = h.calls.find((c) => c.kind === "summarize")!;
+    expect(summarizeCall.prompt).toContain(
+      "PR #15 の本文も同じ内容で gh pr edit --body により更新する",
+    );
   });
 });
