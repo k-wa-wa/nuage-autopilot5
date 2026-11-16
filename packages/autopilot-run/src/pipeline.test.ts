@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CI_LIMITS } from "./ci.ts";
 import { assignRoles } from "./models.ts";
-import { reviewFileName, runPipeline } from "./pipeline.ts";
+import { reviewFileName, runPipeline, specReviewFileName } from "./pipeline.ts";
 import { GATE_VERDICT, VERDICT } from "./prompts.ts";
 import { assignee, checks, pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
@@ -47,23 +47,14 @@ describe("担当 CLI の切り替えと維持", () => {
     expect(h.calls.map((c) => c.inv.agent)).toEqual(["agy"]);
   });
 
-  test("レビューは自由が claude → codex → agy、網羅が codex → claude → agy。別会話で走る", async () => {
+  test("レビューは claude → codex → agy。実装と同じ CLI の別会話も許容する", async () => {
     const h = pipelineHarness({
       commits: [true, false],
       failAgent: (inv, kind) => kind === "review" && inv.agent !== "agy",
     });
     expect((await runPipeline(defaults, h.deps)).kind).toBe("done");
     const reviews = h.calls.filter((c) => c.kind === "review");
-    expect(reviews.filter((c) => c.output?.includes("free")).map((c) => c.inv.agent)).toEqual([
-      "claude",
-      "codex",
-      "agy",
-    ]);
-    expect(reviews.filter((c) => c.output?.includes("coverage")).map((c) => c.inv.agent)).toEqual([
-      "codex",
-      "claude",
-      "agy",
-    ]);
+    expect(reviews.map((c) => c.inv.agent)).toEqual(["claude", "codex", "agy"]);
     expect(reviews.every((c) => c.session === undefined)).toBe(true);
   });
 
@@ -90,30 +81,30 @@ describe("runPipeline: 基本の流れ", () => {
     ]);
   });
 
-  test("レビューは観点ごとに別ファイルへ保存し、修正のプロンプトに全部渡す", async () => {
+  test("レビューは担当ごとに別ファイルへ保存し、修正のプロンプトに全部渡す", async () => {
     const h = pipelineHarness({ commits: [true, false] });
     await runPipeline(cfg, h.deps);
     expect(h.calls.filter((c) => c.kind === "review").map((c) => c.output)).toEqual([
-      "review-1-free.md",
-      "review-1-coverage.md",
+      "review-1-agy.md",
+      "review-1-codex.md",
     ]);
     const fix = h.calls.find((c) => c.kind === "fix")!;
-    expect(fix.prompt).toContain(".autopilot/review-1-free.md");
-    expect(fix.prompt).toContain(".autopilot/review-1-coverage.md");
+    expect(fix.prompt).toContain(".autopilot/review-1-agy.md");
+    expect(fix.prompt).toContain(".autopilot/review-1-codex.md");
   });
 
   test("レビューが成功したら、ファイルの末尾に担当行を追記する", async () => {
     const h = pipelineHarness({ commits: [true, false] });
     await runPipeline(cfg, h.deps);
-    expect(h.deps.state.read("review-1-free.md")).toContain("\n担当: agy\n");
-    expect(h.deps.state.read("review-1-coverage.md")).toContain("\n担当: codex\n");
+    expect(h.deps.state.read("review-1-agy.md")).toContain("\n担当: agy\n");
+    expect(h.deps.state.read("review-1-codex.md")).toContain("\n担当: codex\n");
   });
 
-  test("レビューが成功したら、run.log に観点ごとの担当を残す", async () => {
+  test("レビューが成功したら、run.log に担当を残す", async () => {
     const h = pipelineHarness({ commits: [true, false] });
     await runPipeline(cfg, h.deps);
-    expect(h.logs).toContain("レビュー (free): agy");
-    expect(h.logs).toContain("レビュー (coverage): codex");
+    expect(h.logs).toContain("レビュー: agy");
+    expect(h.logs).toContain("レビュー: codex");
   });
 
   test("人間の追加指示は修正のプロンプトに渡す", async () => {
@@ -149,7 +140,7 @@ describe("runPipeline: 修正ループを指摘の連鎖で回し続けない", 
   test("1 周目に must が無ければ、should まで直して再レビューせずに終える", async () => {
     const h = pipelineHarness({ commits: [true, true], review: none });
     expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
-    expect(reviewsOf(h)).toHaveLength(2);
+    expect(reviewsOf(h)).toHaveLength(1);
     expect(fixesOf(h)[0]?.prompt).toContain("must と should を直す");
     expect(h.calls.at(-1)?.kind).toBe("summarize");
     expect(h.stages).not.toContain("");
@@ -158,7 +149,7 @@ describe("runPipeline: 修正ループを指摘の連鎖で回し続けない", 
   test("must の無い修正は、CI だけ確かめて終える", async () => {
     const h = pipelineHarness({ commits: [true, true], review: none, github: { pr: 7 } });
     expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
-    expect(reviewsOf(h)).toHaveLength(2);
+    expect(reviewsOf(h)).toHaveLength(1);
     expect(h.stages).toContain("waiting CI (round 2)");
   });
 
@@ -169,7 +160,7 @@ describe("runPipeline: 修正ループを指摘の連鎖で回し続けない", 
       github: { pr: 7, snapshots: [checks("pass"), checks("fail"), checks("pass")] },
     });
     expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
-    expect(reviewsOf(h)).toHaveLength(2);
+    expect(reviewsOf(h)).toHaveLength(1);
     const second = fixesOf(h)[1]!;
     expect(second.prompt).toContain(".autopilot/ci-fail-2.log");
     expect(second.prompt).not.toContain("レビュー結果");
@@ -192,9 +183,7 @@ describe("runPipeline: 修正ループを指摘の連鎖で回し続けない", 
     expect(h.calls.map((c) => c.kind)).toEqual([
       "implement",
       "review",
-      "review",
       "fix",
-      "review",
       "review",
       "summarize",
     ]);
@@ -204,7 +193,7 @@ describe("runPipeline: 修正ループを指摘の連鎖で回し続けない", 
     const h = pipelineHarness({ commits: [true, true, false], review: must });
     await runPipeline(one, h.deps);
     const first = reviewsOf(h)[0]!;
-    const second = reviewsOf(h)[2]!;
+    const second = reviewsOf(h)[1]!;
     expect(first?.prompt).not.toContain("前回のレビューの後の修正");
     expect(second?.prompt).toContain("git diff sha1..HEAD");
     expect(second?.prompt).toContain("git diff sha0...HEAD");
@@ -213,7 +202,7 @@ describe("runPipeline: 修正ループを指摘の連鎖で回し続けない", 
   test("人間の追加指示を受けた修正は、must が無くても再レビューする", async () => {
     const h = pipelineHarness({ commits: [true, true, false], review: none, inbox: true });
     expect(await runPipeline(one, h.deps)).toEqual({ kind: "done" });
-    expect(reviewsOf(h)).toHaveLength(4);
+    expect(reviewsOf(h)).toHaveLength(2);
   });
 
   test("上限で終わったとき、最後の修正が must でなければ CI を確かめていないと伝える", async () => {
@@ -244,9 +233,7 @@ describe("runPipeline: 修正担当は実装担当の会話を引き継ぐ", () 
     expect(h.calls.map((c) => `${c.kind}:${JSON.stringify(c.session ?? null)}`)).toEqual([
       'implement:{"kind":"start"}',
       "review:null",
-      "review:null",
       'fix:{"kind":"resume","id":"conv1"}',
-      "review:null",
       "review:null",
       'fix:{"kind":"resume","id":"conv1"}',
       "summarize:null",
@@ -416,34 +403,15 @@ describe("runPipeline: CI", () => {
 });
 
 describe("runPipeline: レビュー担当の失敗", () => {
-  test("一部が落ちても止めず、落ちた担当のレビューは修正に渡さない。欠けた観点は要約に伝える", async () => {
+  test("一部が落ちても止めず、落ちた担当のレビューは修正に渡さない", async () => {
     const h = pipelineHarness({
       commits: [true, false],
       failAgent: (s, k) => s.agent === "agy" && k === "review",
     });
     expect(await runPipeline(cfg, h.deps)).toEqual({ kind: "done" });
     const fix = h.calls.find((c) => c.kind === "fix")!;
-    expect(fix.prompt).not.toContain("review-1-free.md");
-    expect(fix.prompt).toContain("review-1-coverage.md");
-    const summarize = h.calls.find((c) => c.kind === "summarize")!;
-    expect(summarize.prompt).toContain("全候補が失敗してレビューが欠けた観点: free (round 1)");
-  });
-
-  test("片方が利用上限なら別の担当が両方の観点を見る", async () => {
-    const defaults = { ...cfg, ...assignRoles({ level: "high" }, {}) };
-    const h = pipelineHarness({
-      commits: [true, false],
-      failAgent: (inv, kind) => kind === "review" && inv.agent === "claude",
-    });
-    expect(await runPipeline(defaults, h.deps)).toEqual({ kind: "done" });
-    const reviews = h.calls.filter((c) => c.kind === "review");
-    expect(reviews.map((c) => [c.inv.agent, c.output])).toEqual([
-      ["claude", "review-1-free.md"],
-      ["codex", "review-1-coverage.md"],
-      ["codex", "review-1-free.md"],
-    ]);
-    expect(h.deps.state.read("review-1-free.md")).toContain("\n担当: codex\n");
-    expect(h.deps.state.read("review-1-coverage.md")).toContain("\n担当: codex\n");
+    expect(fix.prompt).not.toContain("review-1-agy.md");
+    expect(fix.prompt).toContain("review-1-codex.md");
   });
 
   test("全員が落ちたら、レビュー無しで完了にせず人間に戻す", async () => {
@@ -468,7 +436,7 @@ describe("runPipeline: モデルの切り替え", () => {
       failAgent: (inv) => inv.model === "a1",
     });
     expect(await runPipeline(pipelineConfig(claude, [agy]), h.deps)).toEqual({ kind: "done" });
-    expect(models(h, "review")).toEqual(["a1", "a1", "a2", "a2"]);
+    expect(models(h, "review")).toEqual(["a1", "a2"]);
     expect(h.logs).toContain("agy:a1 が失敗した。agy:a2 で試し直す");
   });
 
@@ -478,13 +446,13 @@ describe("runPipeline: モデルの切り替え", () => {
       failAgent: (inv) => inv.model === "a1",
     });
     await runPipeline(pipelineConfig(claude, [agy]), h.deps);
-    expect(models(h, "review")).toEqual(["a1", "a1", "a2", "a2", "a2", "a2"]);
+    expect(models(h, "review")).toEqual(["a1", "a2", "a2"]);
   });
 
   test("並びが全部失敗したら、その担当は失敗にする（下の段階には落とさない）", async () => {
     const h = pipelineHarness({ commits: [true], failAgent: (_, k) => k === "review" });
     expect((await runPipeline(pipelineConfig(claude, [agy]), h.deps)).kind).toBe("needs-human");
-    expect(models(h, "review")).toEqual(["a1", "a1", "a2", "a2"]);
+    expect(models(h, "review")).toEqual(["a1", "a2"]);
   });
 
   test("実装担当が何も変えずに失敗したら、次のモデルで実装する", async () => {
@@ -531,7 +499,6 @@ describe("runPipeline: モデルの切り替え", () => {
     expect(h.calls.map((c) => `${c.kind}=${c.inv.model}`)).toEqual([
       "implement=hi",
       "review=rv",
-      "review=rv",
       "fix=hi",
       "summarize=lo",
     ]);
@@ -544,9 +511,9 @@ describe("runPipeline: --from review", () => {
   test("実装を呼ばず、今のブランチの PR の CI を待ってからレビューする", async () => {
     const h = pipelineHarness({ commits: [false], startHead: 2, github: { pr: 56 } });
     expect(await runPipeline(fromReview, h.deps)).toEqual({ kind: "done" });
-    expect(h.calls.map((c) => c.kind)).toEqual(["review", "review", "fix", "summarize"]);
+    expect(h.calls.map((c) => c.kind)).toEqual(["review", "fix", "summarize"]);
     expect(h.stages.some((s) => s.startsWith("implementing"))).toBe(false);
-    expect(h.stages[0]).toBe("reviewing (round 1: agy, agy) + waiting CI");
+    expect(h.stages[0]).toBe("reviewing (round 1: agy) + waiting CI");
     expect(h.logs).toContain("PR #56");
   });
 
@@ -559,7 +526,7 @@ describe("runPipeline: --from review", () => {
   test("--local 相当（GitHub 無し）では、PR を使わずにローカルの commit をレビューする", async () => {
     const h = pipelineHarness({ commits: [false], startHead: 2 });
     expect(await runPipeline(fromReview, h.deps)).toEqual({ kind: "done" });
-    expect(h.calls.map((c) => c.kind)).toEqual(["review", "review", "fix", "summarize"]);
+    expect(h.calls.map((c) => c.kind)).toEqual(["review", "fix", "summarize"]);
     expect(h.calls[0]?.prompt).toContain("git diff sha0...HEAD");
   });
 
@@ -570,13 +537,22 @@ describe("runPipeline: --from review", () => {
   });
 });
 
-describe("reviewFileName", () => {
-  test("観点でファイル名が決まり、同じエージェントでも衝突しない", () => {
-    const a = reviewFileName("free", 1);
-    const b = reviewFileName("coverage", 1);
-    expect(a).toBe("review-1-free.md");
-    expect(b).toBe("review-1-coverage.md");
+describe("reviewFileName / specReviewFileName", () => {
+  test("担当名でファイル名が決まり、同じエージェントをモデル違いで並べても衝突しない", () => {
+    const a = reviewFileName(assignee("agy", "model-a"), 1);
+    const b = reviewFileName(assignee("agy", "model-b"), 1);
+    expect(a).toBe("review-1-agy-model-a.md");
+    expect(b).toBe("review-1-agy-model-b.md");
     expect(a).not.toBe(b);
+
+    const sa = specReviewFileName(assignee("agy", "model-a"), 1);
+    expect(sa).toBe("spec-review-1-agy-model-a.md");
+  });
+
+  test("ファイル名に使えない文字を残さない", () => {
+    expect(reviewFileName(assignee("claude", "a b", "c@high"), 2)).toBe(
+      "review-2-claude-a-b-c-high.md",
+    );
   });
 });
 
@@ -900,13 +876,7 @@ describe("runPipeline: 担当の後に作業ツリーが綺麗かを確かめる
       kind: "needs-human",
       reason: "修正担当の実行後、作業ツリーに未 commit のファイルが残っている: ?? left-1.txt",
     });
-    expect(h.calls.map((c) => c.kind)).toEqual([
-      "implement",
-      "review",
-      "review",
-      "fix",
-      "summarize",
-    ]);
+    expect(h.calls.map((c) => c.kind)).toEqual(["implement", "review", "fix", "summarize"]);
   });
 
   test("2 周目以降の修正の後も確かめる", async () => {
@@ -984,5 +954,161 @@ describe("runPipeline: 担当の後に作業ツリーが綺麗かを確かめる
       kind: "needs-human",
       reason: "修正ループが上限（1 回）に達した。最後の修正の CI と全ゲートを確かめていない",
     });
+  });
+});
+
+describe("runPipeline: 仕様検討（--from spec）", () => {
+  const specCfg = pipelineConfig(assignee("claude"), [assignee("agy")], { from: "spec" });
+
+  test("確定して実装へ進む（仕様検討 → 仕様レビュー → 実装 → レビュー → 要約）", async () => {
+    const h = pipelineHarness({ commits: [true, false] });
+    expect(await runPipeline(specCfg, h.deps)).toEqual({ kind: "done" });
+    expect(h.calls.map((c) => `${c.inv.agent}:${c.kind}`)).toEqual([
+      "claude:spec",
+      "agy:specReview",
+      "claude:implement",
+      "agy:review",
+      "claude:fix",
+      "claude:summarize",
+    ]);
+    expect(h.stages).toContain("specifying (claude)");
+    expect(h.stages).toContain("spec reviewing (round 1: agy)");
+    expect(h.stages).toContain("implementing (claude)");
+    expect(h.logs).toContain("仕様を確定した");
+
+    // 実装・修正・レビュー・要約に spec.md が渡る
+    const impl = h.calls.find((c) => c.kind === "implement")!;
+    expect(impl.prompt).toContain(".autopilot/spec.md の仕様を実装");
+    const rev = h.calls.find((c) => c.kind === "review")!;
+    expect(rev.prompt).toContain(".autopilot/spec.md の仕様に照らす");
+    const fix = h.calls.find((c) => c.kind === "fix")!;
+    expect(fix.prompt).toContain(".autopilot/spec.md の仕様を読み");
+    const sum = h.calls.find((c) => c.kind === "summarize")!;
+    expect(sum.prompt).toContain(".autopilot/spec.md");
+  });
+
+  test("修正の周と上限（1周目 must あり → 2周目で直って確定）", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      specReview: (round) =>
+        round === 1 ? `${VERDICT.must}\n- must: 要修正` : `${VERDICT.none}\n- 指摘なし`,
+    });
+    expect(await runPipeline(specCfg, h.deps)).toEqual({ kind: "done" });
+    const specCalls = h.calls.filter((c) => c.kind === "spec");
+    expect(specCalls).toHaveLength(2); // 最初 + 修正
+    expect(specCalls[1]?.session).toEqual({ kind: "resume", id: "conv1" });
+    expect(specCalls[1]?.prompt).toContain("spec-review-1-agy.md");
+    // 実装は検討の会話を引き継がない
+    const impl = h.calls.find((c) => c.kind === "implement")!;
+    expect(impl.session).toEqual({ kind: "start" });
+    expect(h.stages).toContain("spec fixing (round 1)");
+    expect(h.stages).toContain("spec reviewing (round 2: agy)");
+    expect(h.logs).toContain("仕様を確定した");
+  });
+
+  test("仕様レビューの must が上限（2 周）まで残ったら needs-human で要約へ進む（実装は呼ばれない）", async () => {
+    const h = pipelineHarness({
+      commits: [true],
+      specReview: () => `${VERDICT.must}\n- must: 直らない`,
+    });
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome).toEqual({
+      kind: "needs-human",
+      reason: "仕様レビューの must が上限まで残った",
+    });
+    expect(h.calls.some((c) => c.kind === "implement")).toBe(false);
+    expect(h.calls.at(-1)?.kind).toBe("summarize");
+    expect(h.calls.at(-1)?.prompt).toContain("needs-human: 仕様レビューの must が上限まで残った");
+  });
+
+  test("needs-human.md による needs-human（検討担当が判断を求めたら要約へ進む）", async () => {
+    const h = pipelineHarness({
+      commits: [true],
+      initialFiles: { "needs-human.md": "仕様の選択肢 A または B\n" },
+    });
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome).toEqual({
+      kind: "needs-human",
+      reason: "仕様の選択肢 A または B",
+    });
+    expect(h.calls.some((c) => c.kind === "implement")).toBe(false);
+    expect(h.calls.at(-1)?.kind).toBe("summarize");
+  });
+
+  test("検討担当が異常終了したら failed", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      failAgent: (_, k) => k === "spec",
+    });
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome).toEqual({
+      kind: "failed",
+      reason: "仕様検討担当が異常終了した",
+    });
+  });
+
+  test("spec.md が書かれなかったら failed", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      writeSpec: false,
+    });
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome).toEqual({
+      kind: "failed",
+      reason: "spec.md が書かれなかった",
+    });
+  });
+
+  test("前回の spec.md があれば spec-prev.md に移し下書きとして渡す", async () => {
+    const h = pipelineHarness({
+      commits: [true, false],
+      initialFiles: { "spec.md": "# 前回の仕様内容" },
+    });
+    expect(await runPipeline(specCfg, h.deps)).toEqual({ kind: "done" });
+    const specCall = h.calls.find((c) => c.kind === "spec")!;
+    expect(specCall.prompt).toContain(".autopilot/spec-prev.md");
+    expect(h.deps.state.read("spec-prev.md")).toBe("# 前回の仕様内容");
+  });
+
+  test("仕様レビュー担当が全員失敗したら needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      failAgent: (_, k) => k === "specReview",
+    });
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome).toEqual({
+      kind: "needs-human",
+      reason: "仕様レビュー担当が全員失敗した",
+    });
+    expect(h.calls.some((c) => c.kind === "implement")).toBe(false);
+  });
+
+  test("作業ツリーに未 commit のファイルが残っていれば needs-human", async () => {
+    const h = pipelineHarness({
+      commits: [],
+      dirtyOnSuccess: (_, k) => k === "spec",
+    });
+    const outcome = await runPipeline(specCfg, h.deps);
+    expect(outcome.kind).toBe("needs-human");
+    if (outcome.kind === "needs-human") {
+      expect(outcome.reason).toContain(
+        "仕様検討担当の実行後、作業ツリーに未 commit のファイルが残っている",
+      );
+    }
+    expect(h.calls.some((c) => c.kind === "implement")).toBe(false);
+  });
+
+  test("仕様ファイルの渡し方: --from implement では spec.md があっても request.md を渡す", async () => {
+    const fromImpl = pipelineConfig(assignee("claude"), [assignee("agy")], { from: "implement" });
+    const h = pipelineHarness({
+      commits: [true, false],
+      initialFiles: { "spec.md": "# 古い仕様" },
+    });
+    expect(await runPipeline(fromImpl, h.deps)).toEqual({ kind: "done" });
+    const impl = h.calls.find((c) => c.kind === "implement")!;
+    expect(impl.prompt).toContain(".autopilot/request.md の仕様を実装");
+    expect(impl.prompt).not.toContain(".autopilot/spec.md");
+    const fix = h.calls.find((c) => c.kind === "fix")!;
+    expect(fix.prompt).toContain(".autopilot/request.md の仕様を読み");
   });
 });

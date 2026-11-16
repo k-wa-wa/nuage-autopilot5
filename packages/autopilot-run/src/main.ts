@@ -42,7 +42,6 @@ import {
   type ModelTable,
 } from "./models.ts";
 import { formatOutcome, runPipeline, START_POINTS, type StartPoint } from "./pipeline.ts";
-import { REVIEW_PERSPECTIVES } from "./prompts.ts";
 import { STATE_DIR, State } from "./state.ts";
 
 const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--level LEVEL] [--max-rounds N] [--local] [--from FROM]
@@ -50,13 +49,14 @@ const USAGE = `usage: autopilot-run [start] [--impl AGENT] [--reviewers A,B] [--
        autopilot-run stop
        autopilot-run models [--file PATH]
 
-  AGENT        ${AGENTS.join(" | ")}（通常: 実装 agy、レビューは自由 claude・網羅 codex）。
+  AGENT        ${AGENTS.join(" | ")}（通常: 実装 agy、レビュー claude）。
                モデルは models.yaml の並びを使う。決め打ちするときは AGENT:MODEL@EFFORT/MODEL と書く（/ の順に試す）
-  --reviewers  レビュー担当（省略時は観点ごとに models.yaml の roles.review の順）
-  --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。レビューとゲートは high、要約は light で固定
+  --reviewers  レビュー担当（省略時は 1 人で models.yaml の roles.review の順。指定時は並列）
+  --level      実装と修正の賢さ。${LEVELS.join(" | ")}（既定: ${DEFAULT_LEVEL}）。検討・レビュー・ゲートは high、要約は light で固定
   --max-rounds 修正ループの上限（1〜10、既定: 3）
   --local      push・PR・CI を行わず、ローカルの差分だけで回す（試運転用）
   --from       どこから始めるか。${START_POINTS.join(" | ")}（既定: implement）。
+               spec は仕様検討から始め、確定後に実装へ進む。
                review は実装を飛ばし、今のブランチの PR（--local ならローカルの commit）のレビューから始める。
                gate は実装とレビューを飛ばし、CI を待ってからゲートだけを走らせる
   models       担当と段階ごとのモデルの並びを表示する。--file で別のファイルを検査する
@@ -121,12 +121,6 @@ export async function parseStartOptions(
   const from = (values.from ?? "implement") as StartPoint;
   if (!START_POINTS.includes(from)) {
     throw new UsageError(`--from は ${START_POINTS.join(" / ")} のどれか: ${values.from}`);
-  }
-
-  if (reviewers && reviewers.length > REVIEW_PERSPECTIVES.length) {
-    throw new UsageError(
-      `--reviewers は観点の数（${REVIEW_PERSPECTIVES.length}）以下で指定すること: ${reviewers.length} 件指定された`,
-    );
   }
 
   // CLI が無いことは利用上限ではない。各観点・実装の先頭候補が無ければ起動前に拒否する。
@@ -201,7 +195,7 @@ async function main(argv: string[]): Promise<number> {
       throw new UsageError(USAGE);
   }
 
-  if (!state.read("brief.md")?.trim()) throw new UsageError(`${state.rel("brief.md")} が無い`);
+  if (!state.read("request.md")?.trim()) throw new UsageError(`${state.rel("request.md")} が無い`);
   const running = state.runningPid();
   if (running) {
     console.error(`すでに実行中 (pid ${running})`);
@@ -279,7 +273,8 @@ async function start(
   const chain = (a: Assignee) => a.chain.map(formatInvocation).join(" → ");
   state.log(
     [
-      `models: implement=${chain(roles.implement)}`,
+      `models: spec=${chain(roles.spec)}`,
+      `implement=${chain(roles.implement)}`,
       `summarize=${chain(roles.summarize)}`,
       `gate=${chain(roles.gate)}`,
       ...roles.reviewers.map((r) => `review(${r.name})=${chain(r)}`),
@@ -335,6 +330,8 @@ async function start(
         read: (n) => state.read(n),
         write: (n, t) => state.write(n, t),
         append: (n, t) => state.append(n, t),
+        remove: (n) => state.remove(n),
+        rename: (f, t) => state.rename(f, t),
         takeInbox: (r) => state.takeInbox(r),
       },
     },

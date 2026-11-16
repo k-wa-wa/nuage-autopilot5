@@ -9,7 +9,6 @@ import {
   type ModelChoice,
   parseModelChoice,
 } from "./agents.ts";
-import { REVIEW_PERSPECTIVES, type ReviewPerspectiveSlug } from "./prompts.ts";
 
 /**
  * どの作業を、どのくらいの賢さで行うか。
@@ -26,8 +25,9 @@ export type Level = (typeof LEVELS)[number];
 /** 実装と修正の賢さの既定。仕事の難しさは窓口が会話から分かるので、--level で変えられる。 */
 export const DEFAULT_LEVEL: Level = "high";
 
-/** 実装・修正以外の作業の賢さ。レビュー・ゲートは見落としが一番高くつき、要約は差分とログをまとめるだけ。 */
+/** 検討・仕様レビュー・レビュー・ゲート・要約の賢さ。見落としが一番高くつき、要約は差分とログをまとめるだけ。 */
 const FIXED_LEVELS = {
+  spec: "high",
   review: "high",
   gate: "high",
   summarize: "light",
@@ -127,25 +127,13 @@ export interface Assignee {
   chain: Invocation[];
 }
 
-export interface ReviewerAssignee extends Assignee {
-  perspective: ReviewPerspectiveSlug;
-}
-
 export interface Assignment {
+  spec: Assignee;
   implement: Assignee;
   fix: Assignee;
   summarize: Assignee;
-  reviewers: ReviewerAssignee[];
+  reviewers: Assignee[];
   gate: Assignee;
-}
-
-/** 観点ごとに試す担当の並びを決める。i 番目から始め、残りは並びの順に試す。 */
-export function rotateReviewers(agents: readonly AgentName[], index: number): AgentName[] {
-  if (agents.length === 0) return [];
-  const start = index % agents.length;
-  const first = agents[start]!;
-  const rest = agents.filter((_, idx) => idx !== start);
-  return [first, ...rest];
 }
 
 /** 作業ごとに、誰がどのモデルの並びで行うかを決める。 */
@@ -165,35 +153,16 @@ export function assignRoles(
     };
   };
   const implement = opts.impl ? as(opts.impl, opts.level) : configured("impl", opts.level);
+  const spec = opts.impl ? as(opts.impl, FIXED_LEVELS.spec) : configured("impl", FIXED_LEVELS.spec);
 
-  let reviewers: ReviewerAssignee[];
+  let reviewers: Assignee[];
   let gate: Assignee;
   if (opts.reviewers && opts.reviewers.length > 0) {
-    reviewers = REVIEW_PERSPECTIVES.map((p, i) => {
-      const spec = opts.reviewers![i % opts.reviewers!.length]!;
-      return {
-        name: formatAgentSpec(spec),
-        perspective: p.slug,
-        chain: resolveChain(spec, FIXED_LEVELS.review, table),
-      };
-    });
-    const gateSpec = opts.reviewers[0]!;
-    gate = {
-      name: formatAgentSpec(gateSpec),
-      chain: resolveChain(gateSpec, FIXED_LEVELS.gate, table),
-    };
+    reviewers = opts.reviewers.map((r) => as(r, FIXED_LEVELS.review));
+    gate = as(opts.reviewers[0]!, FIXED_LEVELS.gate);
   } else {
+    reviewers = [configured("review", FIXED_LEVELS.review)];
     const configuredAgents = table.roles?.review ?? DEFAULT_ROLES.review;
-    reviewers = REVIEW_PERSPECTIVES.map((p, i) => {
-      const order = rotateReviewers(configuredAgents, i);
-      return {
-        name: order[0]!,
-        perspective: p.slug,
-        chain: order.flatMap((agent) =>
-          resolveChain({ agent, models: [] }, FIXED_LEVELS.review, table),
-        ),
-      };
-    });
     gate = {
       name: configuredAgents[0]!,
       chain: configuredAgents.flatMap((agent) =>
@@ -203,6 +172,7 @@ export function assignRoles(
   }
 
   return {
+    spec,
     implement,
     fix: implement,
     summarize: opts.impl

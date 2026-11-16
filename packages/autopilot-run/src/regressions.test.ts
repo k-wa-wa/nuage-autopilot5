@@ -197,15 +197,17 @@ describe("レビュー担当が 0 人でも done になった", () => {
 });
 
 describe("同じエージェントのモデル違いのレビューが同じファイルに上書きされた", () => {
-  test("ファイル名は観点で決まり、同じエージェントでも上書きされない", () => {
-    expect(reviewFileName("free", 1)).not.toBe(reviewFileName("coverage", 1));
+  test("ファイル名は担当名（モデル名を含む）で決まり、同じエージェントでも上書きされない", () => {
+    expect(reviewFileName(assignee("agy", "m1"), 1)).not.toBe(
+      reviewFileName(assignee("agy", "m2"), 1),
+    );
   });
 });
 
 describe("レビューが毎回「指摘なし」の 1 行だけで、確かめた範囲が分からなかった（pechka #75 の試運転）", () => {
   // プロンプトが「問題が無ければ『指摘なし』とだけ出力する」だったので、浅いレビューと見分けられなかった。
   test("指摘が無くても、確かめたことを書かせる", () => {
-    const p = prompts.review("coverage", { baseSha: "abc", since: null });
+    const p = prompts.review({ baseSha: "abc", since: null, specPath: ".autopilot/request.md" });
     expect(p).toContain("確かめたこと:");
     expect(p).not.toContain("とだけ出力する");
   });
@@ -234,8 +236,6 @@ describe("agy の既定モデルが利用上限に達し、レビュー担当が
     expect(o).toEqual({ kind: "done" });
     expect(h.calls.filter((c) => c.kind === "review").map((c) => c.inv.model)).toEqual([
       "exhausted",
-      "exhausted",
-      "available",
       "available",
     ]);
   });
@@ -306,7 +306,7 @@ describe("既存の PR のレビューから再開できなかった（nuage-clu
     );
     expect(o).toEqual({ kind: "done" });
     expect(h.calls.some((c) => c.kind === "implement")).toBe(false);
-    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(2);
+    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(1);
     expect(h.logs).toContain("PR #56");
   });
 
@@ -327,21 +327,21 @@ describe("must の無いラウンドでも修正が commit し続け、上限の
     });
     const o = await runPipeline(pipelineConfig(assignee("agy"), [assignee("claude")]), h.deps);
     expect(o).toEqual({ kind: "done" });
-    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(2);
+    expect(h.calls.filter((c) => c.kind === "review")).toHaveLength(1);
   });
 
   test("修正担当が見送った指摘を、レビュー担当が毎周繰り返した", () => {
     // レビュー担当は decisions.md を読んでいなかった。
-    expect(prompts.review("coverage", { baseSha: "abc", since: "def" })).toContain(
-      ".autopilot/decisions.md",
-    );
+    expect(
+      prompts.review({ baseSha: "abc", since: "def", specPath: ".autopilot/request.md" }),
+    ).toContain(".autopilot/decisions.md");
   });
 });
 
 describe("レビューが仕様受入検査に偏り、ほぼ毎回「must なし / 指摘なし」で修正ループが形骸化した（nuage-cluster、nuage-dr、nuage-usage-ledger）", () => {
   // 1 行目に「判定: must なし」と書いた確証バイアスで、should や nit まで「指摘なし」と省略されていた。
   test("1 行目が must なしでも should / nit を省略せず出させる", () => {
-    const p = prompts.review("coverage", { baseSha: "abc", since: null });
+    const p = prompts.review({ baseSha: "abc", since: null, specPath: ".autopilot/request.md" });
     expect(p).toContain("should や nit があれば「指摘なし」とせず続けてすべて書く");
   });
 });
@@ -389,7 +389,7 @@ describe("ゲート実行中の追加指示を取りこぼし、追加仕様ま�
     const fixes = h.calls.filter((c) => c.kind === "fix");
     expect(fixes[1]?.prompt).toContain(".autopilot/gate-1-e2e.md");
     expect(fixes[1]?.prompt).toContain(".autopilot/inbox-2.md");
-    expect(h.calls.filter((c) => c.output?.startsWith("review-3-")).length).toBe(2);
+    expect(h.calls.filter((c) => c.output?.startsWith("review-3-")).length).toBe(1);
   });
 
   test.each(["gate", "implement"] as const)(
@@ -415,7 +415,7 @@ describe("ゲート実行中の追加指示を取りこぼし、追加仕様ま�
       if (from === "implement") expect(h.deps.state.read("inbox-1.md")).toBe("追加指示");
       expect(
         h.calls.filter((c) => c.output?.startsWith(`review-${from === "gate" ? 2 : 3}-`)),
-      ).toHaveLength(2);
+      ).toHaveLength(1);
       expect(h.calls.at(-1)?.kind).toBe("summarize");
     },
   );

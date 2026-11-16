@@ -20,15 +20,15 @@ interface Env {
 let env: Env;
 afterEach(() => env?.repo.cleanup());
 
-function setup(opts: { branch?: string; brief?: boolean; agents?: string[] } = {}): Env {
+function setup(opts: { branch?: string; request?: boolean; agents?: string[] } = {}): Env {
   const repo = tempRepo(opts.branch);
   const world = fakeWorld(repo.root, opts.agents);
   const home = join(repo.root, "home");
   mkdirSync(home);
   const dir = join(repo.work, ".autopilot");
-  if (opts.brief !== false) {
+  if (opts.request !== false) {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, "brief.md"), "# 目的\nREADME に一行足す\n");
+    writeFileSync(join(dir, "request.md"), "# 目的\nREADME に一行足す\n");
   }
   env = { repo, world, home, dir };
   return env;
@@ -51,19 +51,20 @@ const configuredMain = (args: string[] = ["--local"]) =>
 
 describe("既定の担当と Codex", () => {
   test(
-    "指定なしでは実装 agy、レビューは自由 claude・網羅 codex の 2 担当で動く",
+    "指定なしでは実装 agy、レビュー claude の 1 担当で動く",
     async () => {
       setup();
       env.world.scripts({
         agy: { implement: ["commit"], fix: [], summarize: ["result"] },
         claude: { review: ["say:判定: must なし"] },
-        codex: { review: ["say:判定: must なし"] },
       });
       expect((await configuredMain()).code).toBe(0);
-      const calls = env.world.calls().map((c) => `${c.name}:${c.kind}`);
-      expect(calls[0]).toBe("agy:implement");
-      expect(calls.slice(1, 3).sort()).toEqual(["claude:review", "codex:review"]);
-      expect(calls.slice(3)).toEqual(["agy:fix", "agy:summarize"]);
+      expect(env.world.calls().map((c) => `${c.name}:${c.kind}`)).toEqual([
+        "agy:implement",
+        "claude:review",
+        "agy:fix",
+        "agy:summarize",
+      ]);
     },
     TIMEOUT,
   );
@@ -83,19 +84,20 @@ describe("既定の担当と Codex", () => {
         },
       });
       expect((await configuredMain()).code).toBe(0);
-      const calls = env.world.calls().map((c) => `${c.name}:${c.kind}`);
-      expect(calls.slice(0, 2)).toEqual(["agy:implement", "codex:implement"]);
-      expect(calls.filter((c) => c === "codex:review")).toHaveLength(2);
-      expect(calls.at(-2)).toBe("codex:fix");
-      expect(calls.at(-1)).toBe("codex:summarize");
+      expect(env.world.calls().map((c) => `${c.name}:${c.kind}`)).toEqual([
+        "agy:implement",
+        "codex:implement",
+        "claude:review",
+        "codex:review",
+        "codex:fix",
+        "codex:summarize",
+      ]);
       const fix = env.world.calls().find((c) => c.kind === "fix")!;
       expect(fix.args).toContain("resume");
       expect(fix.args).toContain("codex-conv-1");
       const review = env.world.calls().find((c) => c.name === "codex" && c.kind === "review")!;
       expect(review.args).not.toContain("resume");
-      expect(read("review-1-free.md")).toContain("判定: must なし\n確かめたこと: 差分");
-      expect(read("review-1-free.md")).toContain("担当: codex");
-      expect(read("review-1-coverage.md")).toContain("判定: must なし\n確かめたこと: 差分");
+      expect(read("review-1-claude.md")).toContain("判定: must なし\n確かめたこと: 差分");
       expect(read("result.md")).toBe("要約\n");
     },
     TIMEOUT,
@@ -122,7 +124,7 @@ describe("既定の担当と Codex", () => {
       ).toBe(0);
       expect(env.world.calls().every((c) => c.name === "codex")).toBe(true);
       expect(env.world.calls()[0]!.args).toContain('model_reasoning_effort="high"');
-      expect(read("review-1-free.md")).toContain("判定: must なし");
+      expect(read("review-1-codex.md")).toContain("判定: must なし");
     },
     TIMEOUT,
   );
@@ -172,11 +174,9 @@ describe("--local", () => {
       expect(r.code).toBe(0);
       expect(status()).toBe("done");
       expect(read("result.md")).toBe("要約\n");
-      expect(read("review-1-free.md")).toContain("指摘なし\n");
-      expect(read("review-1-coverage.md")).toContain("指摘なし\n");
+      expect(read("review-1-agy.md")).toContain("指摘なし\n");
       expect(env.world.calls().map((c) => `${c.name}:${c.kind}`)).toEqual([
         "claude:implement",
-        "agy:review",
         "agy:review",
         "claude:fix",
         "claude:summarize",
@@ -289,12 +289,12 @@ describe("修正担当は実装担当の会話を引き継ぐ", () => {
 
 describe("起動前の確認", () => {
   test(
-    "brief.md が無ければ起動しない",
+    "request.md が無ければ起動しない",
     async () => {
-      setup({ brief: false });
+      setup({ request: false });
       const r = await main(["--local"]);
       expect(r.code).toBe(2);
-      expect(r.stderr).toContain("brief.md");
+      expect(r.stderr).toContain("request.md");
       expect(env.world.calls()).toEqual([]);
     },
     TIMEOUT,
@@ -478,7 +478,6 @@ describe("--from review", () => {
       expect(env.world.ghLog()).toContain("pr checks 56 --json bucket");
       expect(env.world.calls().map((c) => `${c.name}:${c.kind}`)).toEqual([
         "agy:review",
-        "agy:review",
         "claude:fix",
         "claude:summarize",
       ]);
@@ -513,7 +512,6 @@ describe("--from review", () => {
       expect(r.code).toBe(0);
       expect(status()).toBe("done");
       expect(env.world.calls().map((c) => `${c.name}:${c.kind}`)).toEqual([
-        "agy:review",
         "agy:review",
         "claude:fix",
         "claude:summarize",
@@ -570,14 +568,12 @@ agy:
       ]);
       expect(invocations("review")).toEqual([
         "agy --model a1 --dangerously-skip-permissions -p",
-        "agy --model a1 --dangerously-skip-permissions -p",
-        "agy --model a2 --dangerously-skip-permissions -p",
         "agy --model a2 --dangerously-skip-permissions -p",
       ]);
       expect(invocations("summarize")).toEqual([
         "claude --model c-small --effort low --dangerously-skip-permissions -p",
       ]);
-      expect(read("review-1-free.md")).toContain("指摘なし\n");
+      expect(read("review-1-agy.md")).toContain("指摘なし\n");
       expect(read("run.log")).toContain("agy:a1 が失敗した。agy:a2 で試し直す");
     },
     TIMEOUT,

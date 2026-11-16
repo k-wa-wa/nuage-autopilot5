@@ -54,6 +54,6 @@ describe("State", () => {
 
   test("rel は worktree からの相対パス（プロンプトに書く用）", () => {
     dir = tempDir();
-    expect(new State(dir.path).rel("brief.md")).toBe(".autopilot/brief.md");
+    expect(new State(dir.path).rel("request.md")).toBe(".autopilot/request.md");
   });
 });

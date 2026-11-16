@@ -3,9 +3,21 @@ import * as prompts from "./prompts.ts";
 import { kindOf, MARKERS } from "./testing/helpers.ts";
 
 const all = {
-  implement: prompts.implement("pr"),
-  reviewFree: prompts.review("free", { baseSha: "abc123", since: null }),
-  reviewCoverage: prompts.review("coverage", { baseSha: "abc123", since: null }),
+  spec: prompts.spec({
+    requestPath: ".autopilot/request.md",
+    specPath: ".autopilot/spec.md",
+    prevSpecPath: null,
+  }),
+  specReview: prompts.specReview({
+    specPath: ".autopilot/spec.md",
+    requestPath: ".autopilot/request.md",
+  }),
+  implement: prompts.implement("pr", ".autopilot/request.md"),
+  review: prompts.review({
+    baseSha: "abc123",
+    since: null,
+    specPath: ".autopilot/request.md",
+  }),
   gate: prompts.gate({
     name: "e2e",
     sourcePath: ".autopilot/gate-src-e2e.md",
@@ -15,63 +27,106 @@ const all = {
   fix: prompts.fix({
     mode: "pr",
     scope: "must-should",
-    reviews: [".autopilot/review-1-free.md", ".autopilot/review-1-coverage.md"],
+    reviews: [".autopilot/review-1-claude.md"],
     ciLog: null,
     inbox: null,
+    specPath: ".autopilot/request.md",
   }),
-  summarize: prompts.summarize("abc123", 7, "done"),
+  summarize: prompts.summarize("abc123", 7, "done", ".autopilot/request.md"),
 };
 
 describe("プロンプト", () => {
   test("種類ごとの目印がちょうど 1 つ入っている（偽のエージェントが役割を見分ける）", () => {
     for (const [kind, prompt] of Object.entries(all)) {
-      const expectedKind = kind.startsWith("review") ? "review" : (kind as keyof typeof MARKERS);
-      expect(kindOf(prompt)).toBe(expectedKind);
+      expect(kindOf(prompt)).toBe(kind as keyof typeof MARKERS);
       const hits = Object.values(MARKERS).filter((m) => prompt.includes(m));
       expect(hits).toHaveLength(1);
     }
   });
 
   test("PR モードは push と PR 作成を指示し、Draft を禁じる", () => {
-    expect(prompts.implement("pr")).toContain("push");
-    expect(prompts.implement("pr")).toContain("gh pr create");
-    expect(prompts.implement("pr")).toContain("Draft にはしない");
+    expect(prompts.implement("pr", ".autopilot/request.md")).toContain("push");
+    expect(prompts.implement("pr", ".autopilot/request.md")).toContain("gh pr create");
+    expect(prompts.implement("pr", ".autopilot/request.md")).toContain("Draft にはしない");
   });
 
   test("--local は push も PR 作成もさせない", () => {
     for (const p of [
-      prompts.implement("local"),
-      prompts.fix({ mode: "local", scope: "must-should", reviews: [], ciLog: null, inbox: null }),
+      prompts.implement("local", ".autopilot/request.md"),
+      prompts.fix({
+        mode: "local",
+        scope: "must-should",
+        reviews: [],
+        ciLog: null,
+        inbox: null,
+        specPath: ".autopilot/request.md",
+      }),
     ]) {
       expect(p).toContain("push と PR 作成はしない");
       expect(p).not.toContain("gh pr create");
     }
   });
 
-  test("2 観点のレビュープロンプトは共通の約束を含む（差分読解・ファイル非変更・1行目判定・確かめたこと・decisions.md）", () => {
-    for (const p of [all.reviewFree, all.reviewCoverage]) {
-      expect(p).toContain("git diff abc123...HEAD");
-      expect(p).toContain("ファイルは一切変更しない");
-      expect(p).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
-      expect(p).toContain("ほかの語は足さない");
-      expect(p).toContain("must: 仕様を満たさない");
-      expect(p).toContain("should や nit として積極的に挙げる");
-      expect(p).toContain("指摘の有無にかかわらず");
-      expect(p).toContain("確かめたこと:");
-      expect(p).toContain(".autopilot/decisions.md");
-      expect(p).toContain("繰り返さない");
-    }
+  test("仕様検討プロンプトは request.md とコードを読み spec.md を書かせ、合意仕様を変更させない", () => {
+    const p = all.spec;
+    expect(p).toContain("あなたは仕様検討の担当である");
+    expect(p).toContain("コードは一切変更しない");
+    expect(p).toContain(".autopilot/request.md とコードを読み、.autopilot/spec.md を書く");
+    expect(p).toContain("内容: 目的 / 仕様 / 受け入れ条件 / 設計判断とその理由");
+    expect(p).toContain(".autopilot/request.md の「合意した仕様」は変えない");
+    expect(p).toContain(".autopilot/needs-human.md に書く（選択肢と推奨を添える）");
+    expect(p).toContain(".autopilot/decisions.md に追記する");
+    expect(p).not.toContain("前回の仕様案");
+
+    const withPrev = prompts.spec({
+      requestPath: ".autopilot/request.md",
+      specPath: ".autopilot/spec.md",
+      prevSpecPath: ".autopilot/spec-prev.md",
+    });
+    expect(withPrev).toContain(
+      "前回の仕様案 .autopilot/spec-prev.md があれば下書きとして参考にしてよい",
+    );
   });
 
-  test("自由レビューは観点一覧を与えず壊れるシナリオを探させる", () => {
-    expect(all.reviewFree).toContain("この変更がマージされたら何が壊れるか");
-    expect(all.reviewFree).toContain("観点の一覧は与えない");
-    expect(all.reviewFree).not.toContain("仕様の充足");
-    expect(all.reviewFree).not.toContain("エッジケース・境界値・異常系");
+  test("仕様レビュープロンプトは 4 観点・判定行・ファイル非変更を含む", () => {
+    const p = all.specReview;
+    expect(p).toContain("あなたは仕様レビュアーである");
+    expect(p).toContain("ファイルは一切変更しない");
+    expect(p).toContain(".autopilot/spec.md を .autopilot/request.md とコードに照らして見る");
+    expect(p).toContain("依頼とのずれ");
+    expect(p).toContain("受け入れ条件");
+    expect(p).toContain("設計の約束との衝突");
+    expect(p).toContain("頼まれていない変更");
+    expect(p).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
+    expect(p).toContain("ほかの語は足さない");
   });
 
-  test("網羅レビューは具体的な批判的観点（6 観点チェックリスト）をすべて点検させる", () => {
-    expect(all.reviewCoverage).toContain("差分を疑って読み、壊れるシナリオや盲点を積極的に探す");
+  test("仕様修正プロンプトは must と should を直させ、合意仕様を変更させない", () => {
+    const p = prompts.specFix({
+      specPath: ".autopilot/spec.md",
+      requestPath: ".autopilot/request.md",
+      reviews: [".autopilot/spec-review-1-claude.md"],
+    });
+    expect(p).toContain("あなたは仕様検討の担当である");
+    expect(p).toContain("コードは一切変更しない");
+    expect(p).toContain(".autopilot/spec.md の must と should を直す。nit は直さなくてよい");
+    expect(p).toContain(".autopilot/spec-review-1-claude.md");
+    expect(p).toContain(".autopilot/request.md の「合意した仕様」は変えない");
+    expect(p).toContain(".autopilot/needs-human.md に書く（選択肢と推奨を添える）");
+  });
+
+  test("レビュープロンプトは 6 観点点検・ファイル非変更・1行目判定・確かめたこと・decisions.md を含む", () => {
+    const p = all.review;
+    expect(p).toContain("git diff abc123...HEAD");
+    expect(p).toContain("ファイルは一切変更しない");
+    expect(p).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
+    expect(p).toContain("ほかの語は足さない");
+    expect(p).toContain("must: 仕様を満たさない");
+    expect(p).toContain("should や nit として積極的に挙げる");
+    expect(p).toContain("指摘の有無にかかわらず");
+    expect(p).toContain("確かめたこと:");
+    expect(p).toContain(".autopilot/decisions.md");
+    expect(p).toContain("繰り返さない");
     for (const aspect of [
       "仕様の充足",
       "過剰な変更（頼まれていない変更）",
@@ -82,7 +137,7 @@ describe("プロンプト", () => {
       "副作用・退行（Regression）",
       "テストの妥当性と十分性",
     ]) {
-      expect(all.reviewCoverage).toContain(aspect);
+      expect(p).toContain(aspect);
     }
   });
 
@@ -90,16 +145,16 @@ describe("プロンプト", () => {
     const p = prompts.fix({
       mode: "pr",
       scope: "must-should",
-      reviews: [".autopilot/review-1-free.md", ".autopilot/review-1-coverage.md"],
+      reviews: [".autopilot/review-1-claude.md"],
       ciLog: ".autopilot/ci-fail-1.log",
       inbox: ".autopilot/inbox-1.md",
       gateLogs: [".autopilot/gate-1-e2e.md"],
+      specPath: ".autopilot/request.md",
     });
     expect(p).toContain("人間からの追加指示: .autopilot/inbox-1.md（最優先）");
     expect(p).toContain("CI の失敗ログ: .autopilot/ci-fail-1.log");
-    expect(p).not.toContain("（必ず直す）");
     expect(p).toContain("ゲートの不合格結果: .autopilot/gate-1-e2e.md");
-    expect(p).toContain(".autopilot/review-1-free.md, .autopilot/review-1-coverage.md");
+    expect(p).toContain(".autopilot/review-1-claude.md");
     expect(p).toContain("人間に返すかを自分で判断する");
     expect(p).toContain("失敗を隠す修正はしない");
     expect(p).toContain(".autopilot/needs-human.md");
@@ -113,7 +168,6 @@ describe("プロンプト", () => {
     expect(p).toContain("あなたはリポジトリのゲート検証担当である");
     expect(p).toContain("ファイルは一切変更しない");
     expect(p).toContain("ゲートの手順書の「守ること」（読み取り専用など）を最優先にする");
-    // ゲートは並列に走るので、作業ツリー全体を戻すと別のゲートのファイルを消す。
     expect(p).toContain("自分が作ったファイル");
     expect(p).toContain("作業ツリー全体を戻すコマンドは使わない");
     expect(p).not.toContain("作業ツリーを実行前の状態に戻す");
@@ -134,40 +188,43 @@ describe("プロンプト", () => {
     expect(localGate).toContain("「対象外」と判定する");
   });
 
-  test("要約は PR があるときだけ PR 本文も更新させ、観点ごとの担当・件数・欠けた観点を書かせる", () => {
-    expect(prompts.summarize("abc", 7, "done")).toContain("PR #7 の本文");
-    expect(prompts.summarize("abc", null, "done")).not.toContain("PR #");
-    expect(all.summarize).toContain("観点ごとの担当（CLI・モデル）");
-    expect(all.summarize).toContain("観点ごとの must / should の件数");
-    expect(all.summarize).toContain("片方の観点しか挙げなかった must");
-    expect(all.summarize).toContain("欠けた観点があればその旨を書く");
+  test("要約は PR があるときだけ PR 本文も更新させ、担当・件数・主な指摘を書かせる", () => {
+    expect(prompts.summarize("abc", 7, "done", ".autopilot/request.md")).toContain("PR #7 の本文");
+    expect(prompts.summarize("abc", null, "done", ".autopilot/request.md")).not.toContain("PR #");
+    expect(all.summarize).toContain("担当（CLI・モデル）");
+    expect(all.summarize).toContain("must / should の件数");
+    expect(all.summarize).toContain("主な指摘");
+    expect(all.summarize).not.toContain("観点ごとの担当");
+    expect(all.summarize).not.toContain("欠けた観点");
     expect(all.summarize).toContain("gate-*.md");
     expect(all.summarize).toContain("needs-human.md");
     expect(all.summarize).toContain("ゲートごとの判定と担当（CLI・モデル）");
     expect(all.summarize).toContain("対象外・判定不能もその旨を書く");
-
-    const withMissing = prompts.summarize("abc", null, "done", ["free"]);
-    expect(withMissing).toContain("全候補が失敗してレビューが欠けた観点: free");
   });
 
   test("要約に終わり方と理由を渡し、needs-human の理由を人間に渡させる", () => {
-    const p = prompts.summarize("abc", 7, "needs-human: CI が終わらない");
+    const p = prompts.summarize("abc", 7, "needs-human: CI が終わらない", ".autopilot/request.md");
     expect(p).toContain("今回の結果は「needs-human: CI が終わらない」");
-    expect(p).toContain("needs-human ならその理由を「人間の判断が必要なこと」に必ず書く");
+    expect(p).toContain(
+      "needs-human ならその理由を「人間の判断が必要なこと」に必ず書き、選択肢と推奨を添える",
+    );
   });
 
   test("2 周目以降のレビューは、前回レビューした HEAD からの修正を示す", () => {
-    for (const perspective of ["free", "coverage"] as const) {
-      const p = prompts.review(perspective, { baseSha: "abc", since: "def" });
-      expect(p).toContain("git diff abc...HEAD");
-      expect(p).toContain("git diff def..HEAD");
-    }
-    expect(all.reviewFree).not.toContain("前回のレビューの後の修正");
-    expect(all.reviewCoverage).not.toContain("前回のレビューの後の修正");
+    const p = prompts.review({ baseSha: "abc", since: "def", specPath: ".autopilot/request.md" });
+    expect(p).toContain("git diff abc...HEAD");
+    expect(p).toContain("git diff def..HEAD");
+    expect(all.review).not.toContain("前回のレビューの後の修正");
   });
 
   test("修正の範囲: 1 周目は should まで、2 周目以降は must だけ。nit は直させない", () => {
-    const base = { mode: "pr" as const, reviews: [], ciLog: null, inbox: null };
+    const base = {
+      mode: "pr" as const,
+      reviews: [],
+      ciLog: null,
+      inbox: null,
+      specPath: ".autopilot/request.md",
+    };
     expect(prompts.fix({ ...base, scope: "must-should" })).toContain(
       "must と should を直す。nit は直さない",
     );
@@ -176,8 +233,8 @@ describe("プロンプト", () => {
     );
   });
 
-  test("修正は brief.md の仕様を読ませる（--from review / gate では実装の会話が無い）", () => {
-    expect(all.fix).toContain(".autopilot/brief.md の仕様を読み");
+  test("修正は仕様ファイルを読ませる（--from review / gate では実装の会話が無い）", () => {
+    expect(all.fix).toContain(".autopilot/request.md の仕様を読み");
   });
 
   test("修正は、変更しないことを失敗と思わせない", () => {
