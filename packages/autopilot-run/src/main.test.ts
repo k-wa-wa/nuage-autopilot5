@@ -8,25 +8,19 @@ const onPath =
     names.includes(n);
 
 describe("parseStartOptions", () => {
-  test("省略時は実装 agy・レビューは自由 claude・網羅 codex。PATH から担当を増やさない", async () => {
-    const o = await parseStartOptions(
-      { "max-rounds": "3", local: false },
-      onPath("claude", "agy", "codex"),
-    );
+  test("省略時は実装 agy・レビュー claude。PATH から担当を増やさない", async () => {
+    const o = await parseStartOptions({ "max-rounds": "3", local: false }, onPath("claude", "agy"));
     expect(o.impl).toBeUndefined();
     expect(o.reviewers).toBeUndefined();
   });
 
   test("既定担当が PATH に無ければ別候補を選ばず拒否する", async () => {
     await expect(
-      parseStartOptions({ "max-rounds": "3", local: false }, onPath("claude", "codex")),
+      parseStartOptions({ "max-rounds": "3", local: false }, onPath("claude")),
     ).rejects.toThrow(/CLI が PATH にない: agy/);
     await expect(
-      parseStartOptions({ impl: "agy", "max-rounds": "3", local: false }, onPath("agy")),
+      parseStartOptions({ "max-rounds": "3", local: false }, onPath("agy")),
     ).rejects.toThrow(/CLI が PATH にない: claude/);
-    await expect(
-      parseStartOptions({ "max-rounds": "3", local: false }, onPath("agy", "claude")),
-    ).rejects.toThrow(/CLI が PATH にない: codex/);
   });
 
   test("設定の先頭担当を検証する。実装とレビューが同じ CLI でもよい", async () => {
@@ -47,15 +41,14 @@ describe("parseStartOptions", () => {
     ]);
   });
 
-  test("同じレビュー担当の重複も許容する（ファイル名は観点で決まるため）", async () => {
+  test("同じレビュー担当の重複も許容する", async () => {
     const o = await parseStartOptions({ ...base, reviewers: "agy,agy" }, onPath());
     expect(o.reviewers).toHaveLength(2);
   });
 
-  test("観点数を超えるレビュー担当は拒否する", async () => {
-    await expect(
-      parseStartOptions({ ...base, reviewers: "agy,claude,codex" }, onPath()),
-    ).rejects.toThrow(/--reviewers は観点の数（2）以下で指定すること/);
+  test("3 人以上のレビュー担当も許容する（指定時は並列）", async () => {
+    const o = await parseStartOptions({ ...base, reviewers: "agy,claude,codex" }, onPath());
+    expect(o.reviewers).toHaveLength(3);
   });
 
   test("モデル違いの同じエージェントは並べてよい", async () => {
@@ -95,12 +88,14 @@ describe("parseStartOptions", () => {
     );
   });
 
-  test("--from の既定は implement で、implement と review だけ受け付ける", async () => {
+  test("--from の既定は implement で、spec・implement・review・gate だけ受け付ける", async () => {
     expect((await parseStartOptions(base, onPath("agy"))).from).toBe("implement");
+    expect((await parseStartOptions({ ...base, from: "spec" }, onPath("agy"))).from).toBe("spec");
     expect((await parseStartOptions({ ...base, from: "review" }, onPath("agy"))).from).toBe(
       "review",
     );
-    for (const bad of ["fix", "Review", ""]) {
+    expect((await parseStartOptions({ ...base, from: "gate" }, onPath("agy"))).from).toBe("gate");
+    for (const bad of ["fix", "Review", "Spec", ""]) {
       await expect(parseStartOptions({ ...base, from: bad }, onPath("agy"))).rejects.toThrow(
         /--from/,
       );

@@ -53,9 +53,22 @@ describe("責務が 1 箇所に閉じている", () => {
 
 describe("禁止事項はすべての自律ターンに届く", () => {
   const autonomous = {
-    implement: prompts.implement("pr"),
-    fix: prompts.fix({ mode: "pr", scope: "must-should", reviews: [], ciLog: null, inbox: null }),
-    summarize: prompts.summarize("abc", 7, "done"),
+    spec: prompts.spec({ requestPath: ".autopilot/request.md", specPath: ".autopilot/spec.md" }),
+    specFix: prompts.specFix({
+      specPath: ".autopilot/spec.md",
+      requestPath: ".autopilot/request.md",
+      reviews: [],
+    }),
+    implement: prompts.implement("pr", ".autopilot/request.md"),
+    fix: prompts.fix({
+      mode: "pr",
+      scope: "must-should",
+      reviews: [],
+      ciLog: null,
+      inbox: null,
+      specPath: ".autopilot/request.md",
+    }),
+    summarize: prompts.summarize("abc", 7, "done", ".autopilot/request.md"),
     gate: prompts.gate({
       name: "default",
       sourcePath: ".autopilot/gate-src-default.md",
@@ -76,11 +89,18 @@ describe("禁止事項はすべての自律ターンに届く", () => {
   }
 
   test("レビュー担当には何も書かせない", () => {
-    for (const p of prompts.REVIEW_PERSPECTIVES) {
-      expect(prompts.review(p.slug, { baseSha: "abc", since: null })).toContain(
-        "ファイルは一切変更しない",
-      );
-    }
+    expect(
+      prompts.review({ baseSha: "abc", since: null, specPath: ".autopilot/request.md" }),
+    ).toContain("ファイルは一切変更しない");
+  });
+
+  test("仕様レビュー担当には何も書かせない", () => {
+    expect(
+      prompts.specReview({
+        specPath: ".autopilot/spec.md",
+        requestPath: ".autopilot/request.md",
+      }),
+    ).toContain("ファイルは一切変更しない");
   });
 
   test("ゲート検証担当には何も書かせない", () => {
@@ -101,6 +121,7 @@ describe("禁止事項はすべての自律ターンに届く", () => {
       reviews: [],
       ciLog: null,
       inbox: null,
+      specPath: ".autopilot/request.md",
     });
     expect(p).toContain("失敗を隠す修正はしない");
     expect(p).toContain("人間に返すかを自分で判断する");
@@ -181,7 +202,7 @@ describe("全エージェント共通のルール（home/）", () => {
 
   test("スキルは実在するコマンドとファイルだけを案内する", () => {
     expect(skill).toContain("autopilot-run");
-    for (const f of ["brief.md", "inbox.md", "status", "result.md", "run.log"]) {
+    for (const f of ["request.md", "inbox.md", "status", "result.md", "run.log"]) {
       expect(skill).toContain(f);
     }
     // スキルが案内するオプションは main.ts が受け付けるものだけ
@@ -208,21 +229,21 @@ describe("担当の切り替えの約束", () => {
   const roles = assignRoles({ level: "high" }, {});
   const cfg = { ...pipelineConfig(roles.implement, roles.reviewers), ...roles };
 
-  test("通常は実装 agy、レビューは自由 claude・網羅 codex。同じ CLI の独立したレビューも指定できる", () => {
+  test("通常は実装 agy、レビュー claude。同じ CLI の独立したレビューも指定できる", () => {
     expect(roles.implement.chain[0]!.agent).toBe("agy");
-    expect(roles.reviewers).toHaveLength(2);
+    expect(roles.reviewers).toHaveLength(1);
     expect(roles.reviewers[0]!.chain[0]!.agent).toBe("claude");
-    expect(roles.reviewers[1]!.chain[0]!.agent).toBe("codex");
     expect(AGENTS).toEqual(["claude", "agy", "codex"]);
   });
 
-  test("レビューの性質は観点で持ち、エージェントの違いに頼らない", () => {
-    expect(prompts.REVIEW_PERSPECTIVES.map((p) => p.slug)).toEqual(["free", "coverage"]);
-    for (const p of prompts.REVIEW_PERSPECTIVES) {
-      const text = prompts.review(p.slug, { baseSha: "abc", since: null });
-      expect(text).toContain("あなたはコードレビュアーである。ファイルは一切変更しない");
-      expect(text).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
-    }
+  test("レビュー担当には 1 行目判定を強制し、コードを変更させない", () => {
+    const text = prompts.review({
+      baseSha: "abc",
+      since: null,
+      specPath: ".autopilot/request.md",
+    });
+    expect(text).toContain("あなたはコードレビュアーである。ファイルは一切変更しない");
+    expect(text).toContain(`「${prompts.VERDICT.must}」か「${prompts.VERDICT.none}」`);
   });
 
   test("利用不能以外の失敗と変更途中の失敗では担当を切り替えない", async () => {

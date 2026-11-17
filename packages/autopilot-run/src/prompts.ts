@@ -13,35 +13,87 @@ export type ShipMode = "pr" | "local";
 
 function ship(mode: ShipMode): string {
   return mode === "pr"
-    ? "変更を commit して作業ブランチを push する。PR が無ければ gh pr create で作る（本文に brief の要点、関連 Issue があれば Closes #番号）。Draft にはしない。"
+    ? "変更を commit して作業ブランチを push する。PR が無ければ gh pr create で作る（本文に request の要点、関連 Issue があれば Closes #番号）。Draft にはしない。"
     : "変更は commit まで行う。push と PR 作成はしない。";
 }
 
-export function implement(mode: ShipMode): string {
+export function implement(mode: ShipMode, specPath: string): string {
   return `${RULES}
 
-.autopilot/brief.md の仕様を実装し、テストがあれば実行して通す。${ship(mode)}`;
+${specPath} の仕様を実装し、テストがあれば実行して通す。${ship(mode)}`;
+}
+
+export interface SpecInput {
+  requestPath: string;
+  specPath: string;
+  prevSpecPath?: string | null;
+}
+
+export function spec(input: SpecInput): string {
+  const prev = input.prevSpecPath
+    ? `\n前回の仕様案 ${input.prevSpecPath} があれば下書きとして参考にしてよい。`
+    : "";
+  return `あなたは仕様検討の担当である。コードは一切変更しない。
+${AUTONOMOUS_RULES}
+迷ったら妥当な方を選び、判断と理由を .autopilot/decisions.md に追記する。
+
+${input.requestPath} とコードを読み、${input.specPath} を書く。
+内容: 目的 / 仕様 / 受け入れ条件 / 設計判断とその理由。
+${input.requestPath} の「合意した仕様」は変えない。
+人間に聞くことがあれば .autopilot/needs-human.md に書く（選択肢と推奨を添える）。${prev}`;
+}
+
+export interface SpecReviewInput {
+  specPath: string;
+  requestPath: string;
+}
+
+export function specReview(input: SpecReviewInput): string {
+  return `あなたは仕様レビュアーである。ファイルは一切変更しない。
+${input.specPath} を ${input.requestPath} とコードに照らして見る。
+.autopilot/decisions.md があれば読む。そこで理由を付けて見送った指摘は、その理由が誤っている根拠を示せない限り繰り返さない。
+
+次の観点を点検する。
+- 依頼とのずれ: ${input.requestPath} の依頼や合意内容とずれていないか
+- 受け入れ条件: 確かめられる受け入れ条件になっているか
+- 設計の約束との衝突: リポジトリのルールや設計指針と衝突していないか
+- 頼まれていない変更: 依頼にない不要な変更や過剰な仕様が含まれていないか
+
+重要度は次のとおり付ける。
+- must: 依頼を満たさない・矛盾や欠陥がある・設計の約束に反する。直さずに進められないもの
+- should: 直した方がよいが、直さなくても進められるもの
+- nit: 好みや体裁・より良い書き方の提案
+
+出力する前に上の全観点で指摘（must / should / nit）を洗い出す。
+1 行目は「${VERDICT.must}」か「${VERDICT.none}」の文字列だけを書き、ほかの語は足さない。
+2 行目以降に、指摘を重要度付きの箇条書きで書く（「${VERDICT.none}」は must が 0 件という意味であり、should や nit があれば「指摘なし」とせず続けてすべて書く）。`;
+}
+
+export interface SpecFixInput {
+  specPath: string;
+  requestPath: string;
+  reviews: string[];
+}
+
+export function specFix(input: SpecFixInput): string {
+  return `${AUTONOMOUS_RULES}
+
+あなたは仕様検討の担当である。コードは一切変更しない。
+仕様レビュー結果を読み、${input.specPath} の must と should を直す。nit は直さなくてよい。
+仕様レビュー結果: ${input.reviews.join(", ")}
+${input.requestPath} の「合意した仕様」は変えない。
+must を見送るときは、理由を .autopilot/decisions.md に書く。
+人間に聞くことがあれば .autopilot/needs-human.md に書く（選択肢と推奨を添える）。`;
 }
 
 /** レビューの 1 行目。修正ループはこれを読んで、再レビューが要るかを決める。 */
 export const VERDICT = { must: "判定: must あり", none: "判定: must なし" } as const;
 
-export type ReviewPerspectiveSlug = "free" | "coverage";
-
-export interface ReviewPerspective {
-  readonly slug: ReviewPerspectiveSlug;
-  readonly name: string;
-}
-
-export const REVIEW_PERSPECTIVES: readonly ReviewPerspective[] = [
-  { slug: "free", name: "自由" },
-  { slug: "coverage", name: "網羅" },
-] as const;
-
 export interface ReviewInput {
   baseSha: string;
   /** 前回のレビューの時点の HEAD。2 周目以降だけ渡す。 */
   since: string | null;
+  specPath: string;
 }
 
 const COMMON_REVIEW_RULES = `重要度は次のとおり付ける。軽微な懸念や好み・改善点であっても、遠慮せず should や nit として積極的に挙げる（1 周目は should を直し、nit は要約で人間に渡すため）。
@@ -49,28 +101,18 @@ const COMMON_REVIEW_RULES = `重要度は次のとおり付ける。軽微な懸
 - should: 直した方がよいが、直さなくても仕様どおり動くもの
 - nit: 好みや体裁・より良い書き方の提案
 
+出力する前に上の全観点で指摘（must / should / nit）を洗い出す。
 1 行目は「${VERDICT.must}」か「${VERDICT.none}」の文字列だけを書き、ほかの語は足さない。
 2 行目以降に、指摘を重要度付きの箇条書きで書く（「${VERDICT.none}」は must が 0 件という意味であり、should や nit があれば「指摘なし」とせず続けてすべて書く）。
 指摘の有無にかかわらず、最後に「確かめたこと:」として、各観点・仕様の各項目・テスト・影響範囲のどれをどう確かめたかを 2〜3 行で書く。`;
 
-export function review(perspective: ReviewPerspectiveSlug, input: ReviewInput): string {
+export function review(input: ReviewInput): string {
   const since = input.since
     ? `\n前回のレビューの後の修正は \`git diff ${input.since}..HEAD\` である。ここを中心に、直っていないものと、修正で新たに壊れたものを見る。`
     : "";
-  const commonHeader = `あなたはコードレビュアーである。ファイルは一切変更しない。
-.autopilot/decisions.md があれば読む。そこで理由を付けて見送った指摘は、その理由が誤っている根拠を示せない限り繰り返さない。`;
-
-  if (perspective === "free") {
-    return `${commonHeader}
-\`git diff ${input.baseSha}...HEAD\` の変更と周辺コードを読み、.autopilot/brief.md の仕様に照らすだけでなく、「この変更がマージされたら何が壊れるか」を自分のやり方で疑って探す。差分を疑って読み、壊れるシナリオや盲点を積極的に探す。${since}
-
-観点の一覧は与えない。自分の経験と直感に従い、壊れるシナリオ・見落とし・想定外の副作用を自由に点検する。
-出力する前に、何が壊れうるかを洗い出す。
-${COMMON_REVIEW_RULES}`;
-  }
-
-  return `${commonHeader}
-\`git diff ${input.baseSha}...HEAD\` の変更と周辺コードを読み、.autopilot/brief.md の仕様に照らすだけでなく、差分を疑って読み、壊れるシナリオや盲点を積極的に探す。${since}
+  return `あなたはコードレビュアーである。ファイルは一切変更しない。
+\`git diff ${input.baseSha}...HEAD\` の変更と周辺コードを読み、${input.specPath} の仕様に照らすだけでなく、差分を疑って読み、壊れるシナリオや盲点を積極的に探す。${since}
+.autopilot/decisions.md があれば読む。そこで理由を付けて見送った指摘は、その理由が誤っている根拠を示せない限り繰り返さない。
 
 次の観点をすべて点検する。
 - 仕様の充足: 解釈違い・見落とし・過剰な変更（頼まれていない変更）がないか
@@ -80,7 +122,6 @@ ${COMMON_REVIEW_RULES}`;
 - 既存機能への副作用・退行（Regression）: 既存の振る舞いや呼び出し元を壊していないか
 - テストの妥当性と十分性: 正常系のみのテストになっていないか、不十分なモックで欠陥を隠していないか
 
-出力する前に上の全観点で指摘（must / should / nit）を洗い出す。
 ${COMMON_REVIEW_RULES}`;
 }
 
@@ -176,6 +217,7 @@ export interface FixInput {
   ciLog: string | null;
   inbox: string | null;
   gateLogs?: string[];
+  specPath: string;
 }
 
 export function fix(input: FixInput): string {
@@ -193,7 +235,7 @@ export function fix(input: FixInput): string {
       : "レビューの must だけを直す。should と nit は直さない。";
   return `${RULES}
 
-.autopilot/brief.md の仕様を読み、仕様に照らして直す（実装の会話の続きでないときも、仕様を知ったうえで判断するため）。
+${input.specPath} の仕様を読み、仕様に照らして直す（実装の会話の続きでないときも、仕様を知ったうえで判断するため）。
 次のファイルを読み、直すべきものを直す。
 ${items.map((i) => `- ${i}`).join("\n")}
 
@@ -215,18 +257,15 @@ export function summarize(
   baseSha: string,
   pr: number | null,
   outcome: string,
-  missingPerspectives: readonly string[] = [],
+  specPath: string,
 ): string {
-  const missing =
-    missingPerspectives.length > 0
-      ? `\n※全候補が失敗してレビューが欠けた観点: ${missingPerspectives.join(", ")}（欠けた旨を要約に明記すること）`
-      : "";
   return `${RULES}
 
-.autopilot/brief.md・decisions.md・review-*.md・gate-*.md・needs-human.md（存在する場合）と \`git log ${baseSha}..HEAD\` を元に、人間向けの要約を .autopilot/result.md に書く。
-今回の結果は「${outcome}」である（autopilot が決めた。needs-human ならその理由を「人間の判断が必要なこと」に必ず書く）。
-内容: 何をしたか / 主な判断とその理由 / 見送った指摘 / 人間の判断が必要なこと。needs-human.md の理由や、ゲートの判定不能・実行失敗なども確認し、判断が必要なことが無ければ「なし」と書く。短く。
-レビュー結果について、観点ごとの担当（CLI・モデル）、観点ごとの must / should の件数、片方の観点しか挙げなかった must、欠けた観点があればその旨を書く。${missing}
+${specPath}・decisions.md・review-*.md・gate-*.md・spec-review-*.md・needs-human.md（存在する場合）と \`git log ${baseSha}..HEAD\` を元に、人間向けの要約を .autopilot/result.md に書く。
+今回の結果は「${outcome}」である（autopilot が決めた。needs-human ならその理由を「人間の判断が必要なこと」に必ず書き、選択肢と推奨を添える）。
+内容: 仕様の要点 / 何をしたか / 主な判断とその理由 / 見送った指摘 / 人間の判断が必要なこと。needs-human.md の理由や、ゲートの判定不能・実行失敗なども確認し、判断が必要なことが無ければ「なし」と書く。短く。
+仕様の要点として、依頼および ${specPath} から何を実現したか（仕様未確定の場合はその旨と仕様案の要点）を書く。
+レビュー結果について、仕様レビューとコードレビューそれぞれの担当（CLI・モデル）、判定（must あり / なし）、must / should の件数、主な指摘を書く。
 gate-src-*.md は手順書なので結果と混同しない。run.log と照合して今回の実行の結果だけを扱う。
 ゲート結果について、ゲートごとの判定と担当（CLI・モデル）を書く（対象外・判定不能もその旨を書く）。${
     pr ? `\nPR #${pr} の本文も同じ内容で gh pr edit --body により更新する。` : ""

@@ -7,7 +7,7 @@ import * as prompts from "./prompts.ts";
 /**
  * 任された仕事を最後まで進める流れ。
  *
- *   実装 → PR → [CI 待ち ‖ レビュー → 修正] を上限回数まで → ゲート → 要約
+ *   [仕様検討 → 仕様レビュー → 仕様確定] → 実装 → PR → [CI 待ち ‖ レビュー → 修正] を上限回数まで → ゲート → 要約
  *
  * 修正ループは、指摘の連鎖で上限まで回らないように絞る。
  * - 1 周目は must と should を直し、2 周目以降は must だけを直す。nit と見送った指摘は要約で人間に渡す
@@ -16,9 +16,10 @@ import * as prompts from "./prompts.ts";
  * - 修正担当は実装担当の会話の続きで動く。コードを一から読み直さずに済む
  * - 修正ループが done で終わろうとするときにゲートを走らせる。不合格なら修正ループへ戻る
  *
- * 実装・修正・ゲートの担当の後には毎回、作業ツリーに未 commit のファイルが残っていないかを確かめる。
+ * 実装・修正・ゲート・検討の担当の後には毎回、作業ツリーに未 commit のファイルが残っていないかを確かめる。
  * 残っていれば、未 commit の変更込みで検証して done にしないよう needs-human にする。
  *
+ * --from spec では仕様検討から始め、確定後に実装へ進む。
  * --from review では実装を飛ばし、今のブランチの PR（--local ならローカルの commit）のレビューから始める。
  * --from gate では実装とレビューを飛ばし、CI を待ってからゲートだけを走らせる。
  *
@@ -32,8 +33,11 @@ import * as prompts from "./prompts.ts";
 /** CI の状態を読み直す間隔。 */
 export const CI_POLL_MS = 30_000;
 
-/** どこから始めるか。review はレビューから、gate はゲートから。 */
-export const START_POINTS = ["implement", "review", "gate"] as const;
+/** 仕様レビューの上限回数。 */
+export const MAX_SPEC_ROUNDS = 2;
+
+/** どこから始めるか。spec は仕様検討から、review はレビューから、gate はゲートから。 */
+export const START_POINTS = ["spec", "implement", "review", "gate"] as const;
 export type StartPoint = (typeof START_POINTS)[number];
 
 export interface Config extends Assignment {
@@ -85,6 +89,8 @@ export interface Deps {
     read(name: string): string | null;
     write(name: string, text: string): void;
     append(name: string, text: string): void;
+    remove(name: string): void;
+    rename(from: string, to: string): void;
     takeInbox(round: number): string | null;
   };
 }
@@ -94,18 +100,57 @@ export type Outcome =
   | { kind: "needs-human"; reason: string }
   | { kind: "failed"; reason: string };
 
-export interface ReviewOutcome {
-  files: string[];
-  missing: string[];
-}
-
 export function formatOutcome(o: Outcome): string {
   return o.kind === "done" ? "done" : `${o.kind}: ${o.reason}`;
 }
 
-/** レビュー結果のファイル名。エージェント名ではなく観点で付ける。 */
-export function reviewFileName(perspective: prompts.ReviewPerspectiveSlug, round: number): string {
-  return `review-${round}-${perspective}.md`;
+/** ファイル名として安全な slug を作る（英数字・ハイフン等以外を置換し、長さを制限する）。 */
+export function safeAssigneeSlug(name: string, maxLen = 60): string {
+  const sanitized = name.replace(/[^A-Za-z0-9._-]+/g, "-");
+  if (sanitized.length <= maxLen) return sanitized;
+  let hash = 0;
+  for (let i = 0; i < sanitized.length; i++) {
+    hash = (hash * 31 + sanitized.charCodeAt(i)) >>> 0;
+  }
+  const suffix = `-${hash.toString(36)}`;
+  return `${sanitized.slice(0, maxLen - suffix.length)}${suffix}`;
+}
+
+/** プレフィックスと担当者リストから、衝突のない一意なファイル名一覧を生成する。 */
+export function uniqueFileNames(prefix: string, round: number, reviewers: Assignee[]): string[] {
+  const used = new Set<string>();
+  return reviewers.map((r) => {
+    const slug = safeAssigneeSlug(r.name);
+    const base = `${prefix}-${round}-${slug}`;
+    let candidate = `${base}.md`;
+    let count = 1;
+    while (used.has(candidate)) {
+      count++;
+      candidate = `${base}-${count}.md`;
+    }
+    used.add(candidate);
+    return candidate;
+  });
+}
+
+/** レビュー結果のファイル名。 */
+export function reviewFileName(reviewer: Assignee, round: number): string {
+  return `review-${round}-${safeAssigneeSlug(reviewer.name)}.md`;
+}
+
+/** 仕様レビュー結果のファイル名。 */
+export function specReviewFileName(reviewer: Assignee, round: number): string {
+  return `spec-review-${round}-${safeAssigneeSlug(reviewer.name)}.md`;
+}
+
+/** 担当名が重複してもファイル名が衝突しないよう、一意なレビューファイル名を割り当てる。 */
+export function reviewFileNames(reviewers: Assignee[], round: number): string[] {
+  return uniqueFileNames("review", round, reviewers);
+}
+
+/** 担当名が重複してもファイル名が衝突しないよう、一意な仕様レビューファイル名を割り当てる。 */
+export function specReviewFileNames(reviewers: Assignee[], round: number): string[] {
+  return uniqueFileNames("spec-review", round, reviewers);
 }
 
 /** 担当を、モデルの並びの前から順に試す。 */
@@ -177,13 +222,51 @@ class Writer {
 export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
   const mode: prompts.ShipMode = d.github ? "pr" : "local";
   const runner = new Runner(d);
+
+  let specPath = d.state.rel("request.md");
+
+  if (cfg.from === "spec") {
+    const specRes = await runSpecPhase(cfg, d, runner);
+    if (specRes.kind !== "done") {
+      if (specRes.outcome.kind === "needs-human") {
+        d.state.stage("summarizing");
+        // この実行で検討担当が spec.md を書いた場合のみ、未確定の仕様案として渡す
+        const summarySpecPath = specRes.writtenSpec ? d.state.rel("spec.md") : specPath;
+        let pr: number | null = null;
+        if (d.github) {
+          try {
+            pr = await d.github.prNumber();
+            if (pr !== null) d.state.log(`PR #${pr}`);
+          } catch (e) {
+            d.state.log(
+              `PR 番号の取得に失敗した (${e instanceof Error ? e.message : String(e)})。PR 本文の更新は行わず要約を作成する`,
+            );
+          }
+        }
+        if (
+          !(
+            await runner.run(
+              cfg.summarize,
+              prompts.summarize(cfg.baseSha, pr, formatOutcome(specRes.outcome), summarySpecPath),
+              { writes: false },
+            )
+          ).ok
+        ) {
+          d.state.log("要約担当が異常終了した");
+        }
+      }
+      return specRes.outcome;
+    }
+    specPath = d.state.rel("spec.md");
+  }
+
   const writer = new Writer(d, runner);
 
-  if (cfg.from === "implement") {
+  if (cfg.from === "spec" || cfg.from === "implement") {
     d.state.stage(`implementing (${cfg.implement.name})`);
     // 基点ではなく実装の直前と比べる。既存の PR の続きでは、もとから基点より進んでいる。
     const beforeImplement = await d.head();
-    if (!(await writer.run(cfg.implement, prompts.implement(mode)))) {
+    if (!(await writer.run(cfg.implement, prompts.implement(mode, specPath)))) {
       return { kind: "failed", reason: "実装担当が異常終了した" };
     }
     if ((await d.head()) === beforeImplement) {
@@ -191,7 +274,10 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
     }
   }
   /** 実装担当が未 commit のファイルを残したら、レビュー・ゲートへ進まず要約して人間に返す。 */
-  const leftover = cfg.from === "implement" ? await leftoverReason(d, "実装担当の実行後") : null;
+  const leftover =
+    cfg.from === "spec" || cfg.from === "implement"
+      ? await leftoverReason(d, "実装担当の実行後")
+      : null;
 
   let pr: number | null = null;
   if (d.github) {
@@ -199,16 +285,16 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
     if (pr === null && leftover === null) {
       return {
         kind: "failed",
-        reason: cfg.from === "implement" ? "PR が作られなかった" : "PR が無い",
+        reason:
+          cfg.from === "spec" || cfg.from === "implement" ? "PR が作られなかった" : "PR が無い",
       };
     }
     if (pr !== null) d.state.log(`PR #${pr}`);
   }
 
-  const missingPerspectives = new Set<string>();
   const outcome: Outcome = leftover
     ? { kind: "needs-human", reason: leftover }
-    : await rounds(cfg, d, runner, writer, mode, pr, missingPerspectives);
+    : await rounds(cfg, d, runner, writer, mode, pr, specPath);
   if (outcome.kind === "failed") return outcome;
 
   d.state.stage("summarizing");
@@ -217,7 +303,7 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
     !(
       await runner.run(
         cfg.summarize,
-        prompts.summarize(cfg.baseSha, pr, formatOutcome(outcome), Array.from(missingPerspectives)),
+        prompts.summarize(cfg.baseSha, pr, formatOutcome(outcome), specPath),
         { writes: false },
       )
     ).ok
@@ -227,6 +313,166 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
   return outcome;
 }
 
+type SpecPhaseResult = { kind: "done" } | { kind: "abort"; outcome: Outcome; writtenSpec: boolean };
+
+async function runSpecPhase(cfg: Config, d: Deps, runner: Runner): Promise<SpecPhaseResult> {
+  // 1. 前回の spec.md があれば spec-prev.md に移す（前々回からの spec-prev.md があればそれも下書きにする）
+  let prevSpecPath: string | null = null;
+  if (d.state.read("spec.md") !== null) {
+    d.state.rename("spec.md", "spec-prev.md");
+    prevSpecPath = d.state.rel("spec-prev.md");
+  } else if (d.state.read("spec-prev.md") !== null) {
+    prevSpecPath = d.state.rel("spec-prev.md");
+  }
+
+  // 0. 起動時に未 commit のファイルがあれば、検討担当を呼ぶ前に needs-human
+  const initialLeftover = await leftoverReason(d, "仕様検討の開始前");
+  if (initialLeftover) {
+    return {
+      kind: "abort",
+      outcome: { kind: "needs-human", reason: initialLeftover },
+      writtenSpec: false,
+    };
+  }
+
+  // 2. 検討担当を起動する（新しい会話）
+  d.state.stage(`specifying (${cfg.spec.name})`);
+  let specSession: string | null = null;
+  let specInvocation: Invocation | null = null;
+  const specPrompt = prompts.spec({
+    requestPath: d.state.rel("request.md"),
+    specPath: d.state.rel("spec.md"),
+    prevSpecPath,
+  });
+  const r = await runner.run(cfg.spec, specPrompt, {
+    writes: false,
+    session: { kind: "start" },
+  });
+  if (r.ok && r.invocation) specInvocation = r.invocation;
+  if (r.ok && r.session) specSession = r.session;
+
+  // 3. 異常終了または spec.md が書かれなかった → failed
+  if (!r.ok) {
+    return {
+      kind: "abort",
+      outcome: { kind: "failed", reason: "仕様検討担当が異常終了した" },
+      writtenSpec: false,
+    };
+  }
+  if (!d.state.read("spec.md")?.trim()) {
+    return {
+      kind: "abort",
+      outcome: { kind: "failed", reason: "spec.md が書かれなかった" },
+      writtenSpec: false,
+    };
+  }
+
+  // 4. 作業ツリーに未 commit のファイルが残っていれば needs-human
+  const leftover = await leftoverReason(d, "仕様検討担当の実行後");
+  if (leftover) {
+    return {
+      kind: "abort",
+      outcome: { kind: "needs-human", reason: leftover },
+      writtenSpec: true,
+    };
+  }
+
+  // 5. 仕様レビュー担当を起動（上限 2 周）
+  let lastMust = false;
+  for (let specRound = 1; specRound <= MAX_SPEC_ROUNDS; specRound++) {
+    const names = cfg.reviewers.map((rv) => rv.name).join(", ");
+    d.state.stage(`spec reviewing (round ${specRound}: ${names})`);
+    const reviews = await specReview(
+      cfg,
+      d,
+      runner,
+      specRound,
+      d.state.rel("spec.md"),
+      d.state.rel("request.md"),
+    );
+    if (reviews.length === 0) {
+      return {
+        kind: "abort",
+        outcome: { kind: "needs-human", reason: "仕様レビュー担当が全員失敗した" },
+        writtenSpec: true,
+      };
+    }
+    lastMust = reviews.some((name) => prompts.reviewHasMust(d.state.read(name) ?? ""));
+    if (!lastMust) {
+      break;
+    }
+
+    // 6. must があり、上限に達していなければ検討担当の会話の続きで修正
+    if (specRound < MAX_SPEC_ROUNDS) {
+      d.state.stage(`spec fixing (round ${specRound})`);
+      const fixPrompt = prompts.specFix({
+        specPath: d.state.rel("spec.md"),
+        requestPath: d.state.rel("request.md"),
+        reviews: reviews.map((name) => d.state.rel(name)),
+      });
+      if (!specSession) {
+        d.state.log("検討担当の会話 ID が読めないため、新しい会話で始める");
+      }
+      const plan: SessionPlan = specSession
+        ? { kind: "resume", id: specSession }
+        : { kind: "start" };
+      const fixRun = specInvocation
+        ? await d.runAgent(specInvocation, fixPrompt, { session: plan })
+        : await runner.run(cfg.spec, fixPrompt, { writes: false, session: plan });
+      if (!fixRun.ok) {
+        return {
+          kind: "abort",
+          outcome: { kind: "failed", reason: "仕様検討担当が異常終了した" },
+          writtenSpec: true,
+        };
+      }
+      if (fixRun.session) specSession = fixRun.session;
+      if (fixRun.invocation) specInvocation = fixRun.invocation;
+      if (!d.state.read("spec.md")?.trim()) {
+        return {
+          kind: "abort",
+          outcome: { kind: "failed", reason: "spec.md が書かれなかった" },
+          writtenSpec: false,
+        };
+      }
+      const leftoverFix = await leftoverReason(d, "仕様検討担当の実行後");
+      if (leftoverFix) {
+        return {
+          kind: "abort",
+          outcome: { kind: "needs-human", reason: leftoverFix },
+          writtenSpec: true,
+        };
+      }
+    }
+  }
+
+  // 7. must が残っていれば上限到達、needs-human.md が空なら確定
+  if (lastMust) {
+    return {
+      kind: "abort",
+      outcome: { kind: "needs-human", reason: "仕様レビューの must が上限まで残った" },
+      writtenSpec: true,
+    };
+  }
+
+  const needsHuman = d.state.read("needs-human.md")?.trim();
+  if (needsHuman) {
+    const asked =
+      needsHuman
+        .split("\n")
+        .map((l) => l.trim())
+        .find((l) => l.length > 0) ?? "仕様検討担当が人間に判断を求めた";
+    return {
+      kind: "abort",
+      outcome: { kind: "needs-human", reason: asked },
+      writtenSpec: true,
+    };
+  }
+
+  d.state.log("仕様を確定した");
+  return { kind: "done" };
+}
+
 async function rounds(
   cfg: Config,
   d: Deps,
@@ -234,7 +480,7 @@ async function rounds(
   writer: Writer,
   mode: prompts.ShipMode,
   pr: number | null,
-  missingPerspectives: Set<string>,
+  specPath: string,
 ): Promise<Outcome> {
   /** 今の HEAD にレビューが要るか。must の無いレビューの後の修正は、CI だけ確かめる。 */
   let needsReview = cfg.from !== "gate";
@@ -262,15 +508,10 @@ async function rounds(
     const ciPromise: Promise<CiVerdict | null> = github
       ? waitCi(d, github.gh, github.pr)
       : Promise.resolve(null);
-    const reviewPromise: Promise<ReviewOutcome | null> = needsReview
-      ? review(cfg, d, runner, round, reviewedAt)
+    const reviewPromise: Promise<string[] | null> = needsReview
+      ? review(cfg, d, runner, round, reviewedAt, specPath)
       : Promise.resolve(null);
-    const [ci, reviewRes] = await Promise.all([ciPromise, reviewPromise]);
-
-    if (reviewRes) {
-      for (const m of reviewRes.missing) missingPerspectives.add(`${m} (round ${round})`);
-    }
-    const reviews = reviewRes ? reviewRes.files : null;
+    const [ci, reviews] = await Promise.all([ciPromise, reviewPromise]);
 
     let ciLog: string | null = null;
     if (github && ci) {
@@ -333,6 +574,7 @@ async function rounds(
       ciLog,
       inbox,
       gateLogs,
+      specPath,
     });
     if (!(await writer.run(cfg.fix, prompt))) {
       return { kind: "failed", reason: "修正担当が異常終了した" };
@@ -401,40 +643,65 @@ async function rounds(
   };
 }
 
-/** 観点ごとのレビュー担当を全員並べて走らせ、書けたレビューのファイル名を返す。 */
+/** レビュー担当を全員並べて走らせ、書けたレビューのファイル名を返す。 */
 async function review(
   cfg: Config,
   d: Deps,
   runner: Runner,
   round: number,
   since: string | null,
-): Promise<ReviewOutcome> {
+  specPath: string,
+): Promise<string[]> {
+  const names = reviewFileNames(cfg.reviewers, round);
   const results = await Promise.all(
-    cfg.reviewers.map(async (rv) => {
-      const name = reviewFileName(rv.perspective, round);
+    cfg.reviewers.map(async (rv, i) => {
+      const name = names[i]!;
       // レビュー担当はファイルを書き換えないので、失敗したら常に次のモデルで試し直す。
-      const r = await runner.run(
-        rv,
-        prompts.review(rv.perspective, { baseSha: cfg.baseSha, since }),
-        {
-          writes: false,
-          output: name,
-        },
-      );
+      const r = await runner.run(rv, prompts.review({ baseSha: cfg.baseSha, since, specPath }), {
+        writes: false,
+        output: name,
+      });
       if (r.ok && r.invocation) {
         const invStr = formatInvocation(r.invocation);
         d.state.append(name, `\n担当: ${invStr}\n`);
-        d.state.log(`レビュー (${rv.perspective}): ${invStr}`);
-        return { ok: true, name, perspective: rv.perspective };
+        d.state.log(`レビュー: ${invStr}`);
+        return name;
       }
-      d.state.log(`レビュー失敗 (${rv.perspective}): ${rv.name} の全候補が失敗した`);
-      return { ok: false, name, perspective: rv.perspective };
+      d.state.log(`レビュー失敗: ${rv.name} の全候補が失敗した`);
+      return null;
     }),
   );
-  return {
-    files: results.filter((r) => r.ok).map((r) => r.name),
-    missing: results.filter((r) => !r.ok).map((r) => r.perspective),
-  };
+  return results.filter((name): name is string => name !== null);
+}
+
+/** 仕様レビュー担当を全員並べて走らせ、書けたレビューのファイル名を返す。 */
+async function specReview(
+  cfg: Config,
+  d: Deps,
+  runner: Runner,
+  round: number,
+  specPath: string,
+  requestPath: string,
+): Promise<string[]> {
+  const names = specReviewFileNames(cfg.reviewers, round);
+  const results = await Promise.all(
+    cfg.reviewers.map(async (rv, i) => {
+      const name = names[i]!;
+      const r = await runner.run(rv, prompts.specReview({ specPath, requestPath }), {
+        writes: false,
+        output: name,
+      });
+      if (r.ok && r.invocation) {
+        const invStr = formatInvocation(r.invocation);
+        d.state.append(name, `\n担当: ${invStr}\n`);
+        d.state.log(`仕様レビュー: ${invStr}`);
+        return name;
+      }
+      d.state.log(`仕様レビュー失敗: ${rv.name} の全候補が失敗した`);
+      return null;
+    }),
+  );
+  return results.filter((name): name is string => name !== null);
 }
 
 /** 理由に並べる未 commit のファイルの数。多ければ先頭だけにする。 */

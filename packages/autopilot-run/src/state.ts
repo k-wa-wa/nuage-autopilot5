@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -12,15 +13,18 @@ import { join } from "node:path";
 /**
  * 窓口とのやりとりはすべて worktree 直下の .autopilot/ のファイルで行う。
  *
- *   brief.md      窓口が書く。仕様と合意事項
+ *   request.md    窓口が書く。依頼と仕様（丸投げなら合意仕様は空）
+ *   spec.md       検討担当が書く。確定した仕様（--from spec のとき）
+ *   spec-prev.md  前回の spec.md（再実行時の下書き用）
  *   inbox.md      窓口が書く。実行中に人間から来た追加指示（区切りごとに読む）
  *   status        現在の段階（1 行）。最後は done / needs-human: … / failed: … / stopped: …
  *   run.log       全エージェントの出力
- *   agent-stdout.log  会話を引き継ぐ実行（実装・修正）の生の標準出力。本文は run.log にも書く
+ *   agent-stdout.log  会話を引き継ぐ実行（検討・修正）の生の標準出力。本文は run.log にも書く
  *   run.pid       実行中のプロセス
- *   decisions.md  実装担当が書く。判断とその理由
- *   needs-human.md 修正担当が書く。コードで片付かず人間に返す理由
- *   review-N-<観点>.md  レビュー担当が書く。N 周目の観点（free / coverage）ごとの指摘と判定
+ *   decisions.md  実装・検討担当が書く。判断とその理由
+ *   needs-human.md 修正・検討担当が書く。コードや仕様で片付かず人間に返す理由
+ *   spec-review-N-<担当>.md  仕様レビュー担当が書く。N 周目の仕様レビュー結果と判定
+ *   review-N-<担当>.md  レビュー担当が書く。N 周目のコードレビュー結果と判定
  *   gate-src-<名前>.md  autopilot が基点から取り出したゲートの手順書
  *   gate-N-<名前>.md  ゲート検証担当が書く。N 周目の手順の実行結果と合否
  *   result.md     最後に要約担当が書く。人間向けの要約
@@ -71,6 +75,14 @@ export class State {
 
   append(name: string, text: string): void {
     appendFileSync(this.file(name), text);
+  }
+
+  remove(name: string): void {
+    rmSync(this.file(name), { force: true });
+  }
+
+  rename(from: string, to: string): void {
+    renameSync(this.file(from), this.file(to));
   }
 
   /** 追加指示があれば round 用に退避し、その名前を返す。 */

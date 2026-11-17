@@ -14,20 +14,22 @@ import { join } from "node:path";
 import type { AgentName, FailureKind, Invocation } from "../agents.ts";
 import type { CheckBucket, PrSnapshot } from "../ci.ts";
 import type { GateFile, GitHub } from "../github.ts";
-import type { Assignee, ReviewerAssignee } from "../models.ts";
+import type { Assignee } from "../models.ts";
 import type { Config, Deps, SessionPlan } from "../pipeline.ts";
-import { GATE_VERDICT, REVIEW_PERSPECTIVES, VERDICT } from "../prompts.ts";
+import { GATE_VERDICT, VERDICT } from "../prompts.ts";
 
 /**
  * プロンプトの種類を見分ける目印。偽のエージェントはこれで自分の役割を知る。
  * prompts.test.ts が、各プロンプトに目印が入っていることを保証する。
  */
 export const MARKERS = {
-  implement: "brief.md の仕様を実装",
-  review: "あなたはコードレビュアー",
-  fix: "直すべきもの",
-  gate: "リポジトリのゲート検証担当",
-  summarize: "要約を .autopilot/result.md に書く",
+  spec: "あなたは仕様検討の担当である",
+  specReview: "あなたは仕様レビュアーである",
+  implement: "の仕様を実装し、テストがあれば実行して通す",
+  review: "あなたはコードレビュアーである",
+  fix: "直すべきものを直す",
+  gate: "あなたはリポジトリのゲート検証担当である",
+  summarize: "人間向けの要約を .autopilot/result.md に書く",
 } as const;
 export type PromptKind = keyof typeof MARKERS;
 
@@ -109,6 +111,15 @@ export interface HarnessOptions {
   dirtyOnSuccess?: (inv: Invocation, kind: PromptKind) => boolean;
   /** レビューの本文。省略時は must あり（指摘を直せば再レビューする、今までどおりの流れ）。 */
   review?: (round: number, reviewer: string) => string;
+  /** 仕様レビューの本文。省略時は must なし（合格）。 */
+  specReview?: (round: number, reviewer: string) => string;
+  /** 検討担当が spec.md を書き込むか。省略時は true。 */
+  writeSpec?: boolean;
+  /** spec.md の初期書き込み内容。 */
+  specText?: string;
+  spec?: (session: SessionPlan | undefined) => string;
+  /** 事前に配置しておくファイル（spec.md, request.md など）。 */
+  initialFiles?: Record<string, string>;
   /** ゲートの手順書一覧。省略時は空（ゲートなし）。 */
   gates?:
     | Array<{ name: string; path?: string; content?: string }>
@@ -117,12 +128,16 @@ export interface HarnessOptions {
   gate?: (round: number, gateName: string) => string;
   /** 会話 ID を返さないエージェント（出力を読めなかったとき）。 */
   noSession?: boolean;
+  /** 特定の呼び出しで会話 ID を返さないようにする述語。 */
+  omitSession?: (inv: Invocation, kind: PromptKind) => boolean;
+  /** 開始時の未 commit ファイル数。 */
+  initialDirty?: number;
 }
 
 /** エージェント・git・GitHub・時計をすべて偽物にした pipeline の依存。 */
 export function pipelineHarness(opts: HarnessOptions) {
   let head = opts.startHead ?? 0;
-  let dirty = 0;
+  let dirty = opts.initialDirty ?? 0;
   let now = 0;
   const calls: {
     inv: Invocation;
@@ -141,6 +156,9 @@ export function pipelineHarness(opts: HarnessOptions) {
   const snapshots = [...(opts.github?.snapshots ?? [])];
   const storedFiles = new Map<string, string>();
   if (opts.inbox) storedFiles.set("inbox.md", "追加指示");
+  if (opts.initialFiles) {
+    for (const [k, v] of Object.entries(opts.initialFiles)) storedFiles.set(k, v);
+  }
 
   const github: GitHub | null = opts.github
     ? {
@@ -165,6 +183,12 @@ export function pipelineHarness(opts: HarnessOptions) {
         if (opts.dirtyOnFail?.(inv, kind)) dirty++;
         return { ok: false, session: null, failure: opts.failure ?? "unavailable" };
       }
+      if (kind === "spec" && opts.writeSpec !== false) {
+        storedFiles.set(
+          "spec.md",
+          opts.specText ?? (opts.spec ? opts.spec(session) : "# 仕様\n実装する"),
+        );
+      }
       if ((kind === "implement" || kind === "fix") && commits.shift()) head++;
       if (opts.dirtyOnSuccess?.(inv, kind)) dirty++;
       const id = !session
@@ -172,7 +196,7 @@ export function pipelineHarness(opts: HarnessOptions) {
         : session.kind === "resume"
           ? session.id
           : `conv${++conversations}`;
-      return { ok: true, session: opts.noSession ? null : id };
+      return { ok: true, session: opts.noSession || opts.omitSession?.(inv, kind) ? null : id };
     },
     head: async () => `sha${head}`,
     fingerprint: async () => `sha${head}+${dirty}`,
@@ -214,6 +238,15 @@ export function pipelineHarness(opts: HarnessOptions) {
           storedFiles.set(n, initial);
           return initial;
         }
+        const mSpecRev = n.match(/^spec-review-(\d+)-(.+)\.md$/);
+        if (mSpecRev) {
+          const initial = (opts.specReview ?? (() => `${VERDICT.none}\n- 指摘なし`))(
+            Number(mSpecRev[1]),
+            mSpecRev[2]!,
+          );
+          storedFiles.set(n, initial);
+          return initial;
+        }
         const mGate = n.match(/^gate-(\d+)-(.+)\.md$/);
         if (mGate) {
           const initial = (opts.gate ?? (() => `${GATE_VERDICT.pass}\n確かめて問題なし`))(
@@ -231,6 +264,16 @@ export function pipelineHarness(opts: HarnessOptions) {
       append: (n, text) => {
         const cur = deps.state.read(n) ?? "";
         storedFiles.set(n, cur + text);
+      },
+      remove: (n) => {
+        storedFiles.delete(n);
+      },
+      rename: (from, to) => {
+        const val = storedFiles.get(from);
+        if (val !== undefined) {
+          storedFiles.set(to, val);
+          storedFiles.delete(from);
+        }
       },
       takeInbox: (round) => {
         const text = storedFiles.get("inbox.md");
@@ -257,18 +300,12 @@ export function pipelineConfig(
   reviewers: Assignee[],
   extra: Partial<Config> = {},
 ): Config {
-  const reviewerAssignees: ReviewerAssignee[] = REVIEW_PERSPECTIVES.map((p, i) => {
-    const r = reviewers[i % reviewers.length]!;
-    return {
-      ...r,
-      perspective: p.slug,
-    };
-  });
   return {
+    spec: impl,
     implement: impl,
     fix: impl,
     summarize: impl,
-    reviewers: reviewerAssignees,
+    reviewers,
     gate: reviewers[0] ?? impl,
     maxRounds: 3,
     baseSha: "sha0",
@@ -346,6 +383,7 @@ export type Action =
   | "push"
   | "pr"
   | "result"
+  | "spec"
   | "fail"
   | "unavailable"
   | "hang"
@@ -406,6 +444,7 @@ for (const a of actions) {
   } else if (a === "push") sh("git", "push", "-q", "origin", "HEAD");
   else if (a === "pr") sh("gh", "pr", "create", "--fill");
   else if (a === "result") writeFileSync(".autopilot/result.md", "要約\\n");
+  else if (a === "spec") writeFileSync(".autopilot/spec.md", "# 仕様\\n実装する\\n");
   else if (a === "fail") process.exit(3);
   else if (a === "unavailable") { console.error("Rate limit exceeded"); process.exit(3); }
   else if (a.startsWith("fail-if-model:")) {
