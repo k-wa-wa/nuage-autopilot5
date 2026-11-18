@@ -1207,8 +1207,9 @@ describe("runPipeline: 仕様検討（--from spec）", () => {
     expect(outcome.kind).toBe("needs-human");
     const summarizeCall = h.calls.find((c) => c.kind === "summarize")!;
     expect(summarizeCall.prompt).toContain(
-      "PR #15 の本文も同じ内容で gh pr edit --body により更新する",
+      "PR #15 に gh pr comment により要約内容をコメントとして投稿する",
     );
+    expect(summarizeCall.prompt).not.toContain("gh pr edit --body");
   });
 
   test("仕様検討で needs-human 時、PR 番号の取得で例外が起きても failed にならず pr=null で要約が作成される", async () => {
@@ -1223,9 +1224,10 @@ describe("runPipeline: 仕様検討（--from spec）", () => {
     const outcome = await runPipeline(specCfg, h.deps);
     expect(outcome.kind).toBe("needs-human");
     const summarizeCall = h.calls.find((c) => c.kind === "summarize")!;
+    expect(summarizeCall.prompt).not.toContain("gh pr comment");
     expect(summarizeCall.prompt).not.toContain("gh pr edit --body");
     expect(h.logs).toContain(
-      "PR 番号の取得に失敗した (GitHub 通信エラー)。PR 本文の更新は行わず要約を作成する",
+      "PR 番号の取得に失敗した (GitHub 通信エラー)。PR コメントの投稿は行わず要約を作成する",
     );
   });
 });

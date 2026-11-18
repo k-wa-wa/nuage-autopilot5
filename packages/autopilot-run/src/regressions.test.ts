@@ -627,3 +627,17 @@ describe("前置きで前回の判定を引用すると、引用した判定を�
     expect(prompts.reviewHasMust(`> ${VERDICT.none}`)).toBe(false);
   });
 });
+
+describe("要約担当が gh pr edit --body で PR 本文を上書きし、実装・修正担当が書いた PR 本文（What/Why や検証手順等）が消失した (issue #16)", () => {
+  test("要約プロンプトは gh pr edit --body を含まず、PR があるときは gh pr comment を指示する", () => {
+    const promptWithPr = prompts.summarize("base123", 148, "done", ".autopilot/request.md");
+    expect(promptWithPr).not.toContain("gh pr edit");
+    expect(promptWithPr).toContain(
+      "PR #148 に gh pr comment により要約内容をコメントとして投稿する",
+    );
+
+    const promptWithoutPr = prompts.summarize("base123", null, "done", ".autopilot/request.md");
+    expect(promptWithoutPr).not.toContain("gh pr edit");
+    expect(promptWithoutPr).not.toContain("gh pr comment");
+  });
+});

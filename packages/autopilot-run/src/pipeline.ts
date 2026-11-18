@@ -239,7 +239,7 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
             if (pr !== null) d.state.log(`PR #${pr}`);
           } catch (e) {
             d.state.log(
-              `PR 番号の取得に失敗した (${e instanceof Error ? e.message : String(e)})。PR 本文の更新は行わず要約を作成する`,
+              `PR 番号の取得に失敗した (${e instanceof Error ? e.message : String(e)})。PR コメントの投稿は行わず要約を作成する`,
             );
           }
         }
@@ -298,7 +298,7 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
   if (outcome.kind === "failed") return outcome;
 
   d.state.stage("summarizing");
-  // 要約はコードを書き換えない（result.md と PR 本文だけ）ので、何度試し直してもよい。
+  // 要約はコードを書き換えない（result.md と PR コメントだけ）ので、何度試し直してもよい。
   if (
     !(
       await runner.run(

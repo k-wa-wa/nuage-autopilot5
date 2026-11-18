@@ -189,9 +189,17 @@ describe("プロンプト", () => {
     expect(localGate).toContain("「対象外」と判定する");
   });
 
-  test("要約は PR があるときだけ PR 本文も更新させ、担当・件数・主な指摘を書かせる", () => {
-    expect(prompts.summarize("abc", 7, "done", ".autopilot/request.md")).toContain("PR #7 の本文");
+  test("要約は PR があるときだけ PR コメントを投稿させ、担当・件数・主な指摘を書かせる", () => {
+    expect(prompts.summarize("abc", 7, "done", ".autopilot/request.md")).toContain(
+      "PR #7 に gh pr comment により要約内容をコメントとして投稿する",
+    );
+    expect(prompts.summarize("abc", 7, "done", ".autopilot/request.md")).not.toContain(
+      "gh pr edit --body",
+    );
     expect(prompts.summarize("abc", null, "done", ".autopilot/request.md")).not.toContain("PR #");
+    expect(prompts.summarize("abc", null, "done", ".autopilot/request.md")).not.toContain(
+      "gh pr comment",
+    );
     expect(all.summarize).toContain("仕様の要点");
     expect(all.summarize).toContain("仕様レビューとコードレビューそれぞれの担当（CLI・モデル）");
     expect(all.summarize).toContain("判定（must あり / なし）");
