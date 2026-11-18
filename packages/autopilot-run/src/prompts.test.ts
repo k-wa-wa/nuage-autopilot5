@@ -191,7 +191,7 @@ describe("プロンプト", () => {
 
   test("要約は PR があるときだけ PR コメントを投稿させ、担当・件数・主な指摘を書かせる", () => {
     expect(prompts.summarize("abc", 7, "done", ".autopilot/request.md")).toContain(
-      "PR #7 に gh pr comment により要約内容をコメントとして投稿する",
+      "PR #7 に gh pr comment --body-file .autopilot/result.md により要約内容をコメントとして投稿する",
     );
     expect(prompts.summarize("abc", 7, "done", ".autopilot/request.md")).not.toContain(
       "gh pr edit --body",

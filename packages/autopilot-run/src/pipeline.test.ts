@@ -1207,7 +1207,7 @@ describe("runPipeline: 仕様検討（--from spec）", () => {
     expect(outcome.kind).toBe("needs-human");
     const summarizeCall = h.calls.find((c) => c.kind === "summarize")!;
     expect(summarizeCall.prompt).toContain(
-      "PR #15 に gh pr comment により要約内容をコメントとして投稿する",
+      "PR #15 に gh pr comment --body-file .autopilot/result.md により要約内容をコメントとして投稿する",
     );
     expect(summarizeCall.prompt).not.toContain("gh pr edit --body");
   });

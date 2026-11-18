@@ -298,7 +298,8 @@ export async function runPipeline(cfg: Config, d: Deps): Promise<Outcome> {
   if (outcome.kind === "failed") return outcome;
 
   d.state.stage("summarizing");
-  // 要約はコードを書き換えない（result.md と PR コメントだけ）ので、何度試し直してもよい。
+  // 要約はコードを書き換えない（result.md の作成と PR コメント投稿のみ）ので、利用不能時は次のモデルで試し直す。
+  // コメント投稿後に利用上限等で失敗すると二重投稿があり得るが、滅多に起きないため許容する（問題になれば投稿済み確認などを検討）。
   if (
     !(
       await runner.run(

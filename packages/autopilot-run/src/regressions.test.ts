@@ -633,7 +633,7 @@ describe("要約担当が gh pr edit --body で PR 本文を上書きし、実�
     const promptWithPr = prompts.summarize("base123", 148, "done", ".autopilot/request.md");
     expect(promptWithPr).not.toContain("gh pr edit");
     expect(promptWithPr).toContain(
-      "PR #148 に gh pr comment により要約内容をコメントとして投稿する",
+      "PR #148 に gh pr comment --body-file .autopilot/result.md により要約内容をコメントとして投稿する",
     );
 
     const promptWithoutPr = prompts.summarize("base123", null, "done", ".autopilot/request.md");

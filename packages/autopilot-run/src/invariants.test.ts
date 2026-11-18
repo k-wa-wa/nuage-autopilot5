@@ -131,7 +131,9 @@ describe("禁止事項はすべての自律ターンに届く", () => {
   test("要約担当は PR 本文を上書きせず、PR があるときはコメントとして投稿する", () => {
     const p = prompts.summarize("abc", 42, "done", ".autopilot/request.md");
     expect(p).not.toContain("gh pr edit");
-    expect(p).toContain("PR #42 に gh pr comment により要約内容をコメントとして投稿する");
+    expect(p).toContain(
+      "PR #42 に gh pr comment --body-file .autopilot/result.md により要約内容をコメントとして投稿する",
+    );
   });
 });
 
