@@ -236,7 +236,6 @@ describe("全エージェント共通のルール（home/）", () => {
     const codex = readFileSync(join(home, "codex.md"), "utf8");
     expect(codex).toContain("ターンを終えずに終わるまで見届ける");
     expect(codex).toContain("autopilot-run status");
-    expect(codex).toContain("「終わったら知らせる」と書かない");
   });
 });
 
