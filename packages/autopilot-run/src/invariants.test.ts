@@ -231,6 +231,13 @@ describe("全エージェント共通のルール（home/）", () => {
   test("スキルの frontmatter に name と description がある（エージェントが見つけられる）", () => {
     expect(skill).toMatch(/^---\nname: autopilot\ndescription: .+\n---/);
   });
+
+  test("codex は終了で起こされないため、任せた後は終わるまで見届ける", () => {
+    const codex = readFileSync(join(home, "codex.md"), "utf8");
+    expect(codex).toContain("ターンを終えずに終わるまで見届ける");
+    expect(codex).toContain("autopilot-run status");
+    expect(codex).toContain("「終わったら知らせる」と書かない");
+  });
 });
 
 describe("担当の切り替えの約束", () => {

@@ -4,6 +4,7 @@
 # - home/ の共通ルールとスキルを、各エージェント CLI がホーム全体で読む場所へ symlink する。
 #   リポジトリの .agents/skills ではそのリポジトリでしか効かないため、ホーム側に置く。
 #   共通ルールの後ろには、ホストが渡すルール (extraRules) を足す。
+#   codex のルールには、最後に home/codex.md を足す。
 # - 段階ごとのモデルの並び (models.yaml) を /etc/autopilot5/models.yaml に置く。
 #
 # ~/.claude/settings.json などエージェントや Orca が書き換えるファイルには触れない。
@@ -21,6 +22,12 @@ let
   # home/AGENTS.md (窓口としてのルール) の後ろに、ホストが渡すルールを足す。
   rules = pkgs.writeText "AGENTS.md" (
     lib.concatMapStringsSep "\n" builtins.readFile ([ ../home/AGENTS.md ] ++ cfg.extraRules)
+  );
+  # codex には、取り違えやすい読み方を補うルールを最後に足す。
+  codexRules = pkgs.writeText "AGENTS.md" (
+    lib.concatMapStringsSep "\n" builtins.readFile (
+      [ ../home/AGENTS.md ] ++ cfg.extraRules ++ [ ../home/codex.md ]
+    )
   );
   skills = ../home/skills;
 
@@ -65,7 +72,7 @@ let
     in
     # エージェントの認証情報も入る場所なので、本人以外は読めないようにする。
     map (d: "d ${home}/${d} 0700 ${cfg.user} ${group} -") dirs
-    ++ [ "L+ ${home}/${t.rules} - - - - ${rules}" ]
+    ++ [ "L+ ${home}/${t.rules} - - - - ${if agent == "codex" then codexRules else rules}" ]
     ++ map (s: "L+ ${home}/${t.skills}/${s} - - - - ${skills}/${s}") skillNames;
 in
 {
