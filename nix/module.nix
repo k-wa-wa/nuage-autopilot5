@@ -4,6 +4,7 @@
 # - home/ の共通ルールとスキルを、各エージェント CLI がホーム全体で読む場所へ symlink する。
 #   リポジトリの .agents/skills ではそのリポジトリでしか効かないため、ホーム側に置く。
 #   共通ルールの後ろには、ホストが渡すルール (extraRules) を足す。
+#   home/agents/<エージェント>.md があれば、そのエージェントのルールにだけ最後に足す。
 # - 段階ごとのモデルの並び (models.yaml) を /etc/autopilot5/models.yaml に置く。
 #
 # ~/.claude/settings.json などエージェントや Orca が書き換えるファイルには触れない。
@@ -19,9 +20,17 @@ let
   home = config.users.users.${cfg.user}.home;
   group = config.users.users.${cfg.user}.group;
   # home/AGENTS.md (窓口としてのルール) の後ろに、ホストが渡すルールを足す。
-  rules = pkgs.writeText "AGENTS.md" (
-    lib.concatMapStringsSep "\n" builtins.readFile ([ ../home/AGENTS.md ] ++ cfg.extraRules)
-  );
+  # home/agents/<エージェント>.md があれば、そのエージェントにだけ最後に足す (CLI ごとの癖を補う)。
+  rulesOf =
+    agent:
+    let
+      own = ../home/agents + "/${agent}.md";
+    in
+    pkgs.writeText "AGENTS.md" (
+      lib.concatMapStringsSep "\n" builtins.readFile (
+        [ ../home/AGENTS.md ] ++ cfg.extraRules ++ lib.optional (builtins.pathExists own) own
+      )
+    );
   skills = ../home/skills;
 
   # エージェントごとの「ホーム全体で読む共通ルール」と「スキル置き場」。
@@ -65,7 +74,7 @@ let
     in
     # エージェントの認証情報も入る場所なので、本人以外は読めないようにする。
     map (d: "d ${home}/${d} 0700 ${cfg.user} ${group} -") dirs
-    ++ [ "L+ ${home}/${t.rules} - - - - ${rules}" ]
+    ++ [ "L+ ${home}/${t.rules} - - - - ${rulesOf agent}" ]
     ++ map (s: "L+ ${home}/${t.skills}/${s} - - - - ${skills}/${s}") skillNames;
 in
 {
