@@ -480,6 +480,7 @@ const git = (...a) => Bun.spawnSync(["git", ...a]).stdout.toString().trim();
 if (process.env.FAKE_GH_NO_AUTH) { console.error(GH_NO_AUTH); process.exit(4); }
 if (has("repo", "view")) out("main");
 if (has("pr", "create")) { writeFileSync(prFile, "7"); out("https://github.com/o/r/pull/7"); }
+if (has("pr", "comment")) out("");
 if (has("pr", "edit")) out("");
 if (has("pr", "view", "number")) existsSync(prFile) ? out(readFileSync(prFile, "utf8")) : fail('no pull requests found for branch "' + git("branch", "--show-current") + '"');
 if (has("pr", "view", "headRefOid")) {

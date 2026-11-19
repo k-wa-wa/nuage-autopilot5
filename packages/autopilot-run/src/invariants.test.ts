@@ -127,6 +127,14 @@ describe("禁止事項はすべての自律ターンに届く", () => {
     expect(p).toContain("人間に返すかを自分で判断する");
     expect(p).toContain(".autopilot/needs-human.md");
   });
+
+  test("要約担当は PR 本文を上書きせず、PR があるときはコメントとして投稿する", () => {
+    const p = prompts.summarize("abc", 42, "done", ".autopilot/request.md");
+    expect(p).not.toContain("gh pr edit");
+    expect(p).toContain(
+      "PR #42 に gh pr comment --body-file .autopilot/result.md により要約内容をコメントとして投稿する",
+    );
+  });
 });
 
 describe("ゲートは基点から読む", () => {

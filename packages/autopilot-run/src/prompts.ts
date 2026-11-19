@@ -268,6 +268,8 @@ ${specPath}・decisions.md・review-*.md・gate-*.md・spec-review-*.md・needs-
 レビュー結果について、仕様レビューとコードレビューそれぞれの担当（CLI・モデル）、判定（must あり / なし）、must / should の件数、主な指摘を書く。
 gate-src-*.md は手順書なので結果と混同しない。run.log と照合して今回の実行の結果だけを扱う。
 ゲート結果について、ゲートごとの判定と担当（CLI・モデル）を書く（対象外・判定不能もその旨を書く）。${
-    pr ? `\nPR #${pr} の本文も同じ内容で gh pr edit --body により更新する。` : ""
+    pr
+      ? `\nPR #${pr} に gh pr comment --body-file .autopilot/result.md により要約内容をコメントとして投稿する。`
+      : ""
   }`;
 }
