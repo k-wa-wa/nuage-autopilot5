@@ -232,14 +232,10 @@ describe("全エージェント共通のルール（home/）", () => {
     expect(skill).toMatch(/^---\nname: autopilot\ndescription: .+\n---/);
   });
 
-  test("エージェントだけに足すルール（home/agents/）は実在するエージェントの名前で置く", () => {
-    const names = readdirSync(join(home, "agents")).map((f) => f.replace(/\.md$/, ""));
-    for (const name of names) expect(AGENTS).toContain(name as (typeof AGENTS)[number]);
-  });
-
   test("codex は終了で起こされないため、任せた後は終わるまで見届ける", () => {
-    const codex = readFileSync(join(home, "agents", "codex.md"), "utf8");
+    const codex = readFileSync(join(home, "codex.md"), "utf8");
     expect(codex).toContain("ターンを終えずに終わるまで見届ける");
+    expect(codex).toContain("autopilot-run status");
     expect(codex).toContain("「終わったら知らせる」と書かない");
   });
 });
