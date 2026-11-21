@@ -1,9 +1,18 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  appendFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { formatInvocation, getAgentAdapter } from "../../autopilot-run/src/agents.ts";
-import { killAll, run } from "../../autopilot-run/src/exec.ts";
+import { capture, killAll, run } from "../../autopilot-run/src/exec.ts";
 import { loadModelTable, MODELS_PATH, resolveTaskChain } from "../../autopilot-run/src/models.ts";
-import type { TaskConfig } from "./config.ts";
+import type { TaskConfig, TaskMemory } from "./config.ts";
 import {
   acquireLockWithWait,
   type LockHandle,
@@ -12,12 +21,74 @@ import {
   taskLockPath,
   tryAcquireLock,
 } from "./lock.ts";
-import { prepareMemory, syncMemory } from "./memory.ts";
+import { type PreparedMemory, prepareMemory, rollbackFailedMemory, syncMemory } from "./memory.ts";
 import { buildTaskPrompt } from "./prompt.ts";
 
 function appendLog(logPath: string, prefix: string, msg: string): void {
   const time = new Date().toISOString();
   appendFileSync(logPath, `[${time}] ${prefix}${msg}\n`);
+}
+
+function hashDirEntries(dir: string, relBase: string, hash: ReturnType<typeof createHash>): void {
+  const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+  for (const entry of entries) {
+    if (entry.name === ".git") continue;
+    const full = join(dir, entry.name);
+    const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
+    const st = lstatSync(full);
+    if (st.isDirectory()) {
+      hash.update(`D:${rel}\0`);
+      hashDirEntries(full, rel, hash);
+    } else if (st.isFile()) {
+      hash.update(`F:${rel}:${st.size}:${st.mtimeMs}\0`);
+    } else {
+      hash.update(`O:${rel}:${st.mode}\0`);
+    }
+  }
+}
+
+async function snapshotWorkdir(workdir: string): Promise<string> {
+  const inside = await capture(
+    ["git", "-C", workdir, "rev-parse", "--is-inside-work-tree"],
+    workdir,
+  );
+  const hash = createHash("sha256");
+  if (inside.code === 0 && inside.stdout === "true") {
+    const parts = await Promise.all([
+      capture(["git", "-C", workdir, "rev-parse", "HEAD"], workdir),
+      capture(
+        ["git", "-C", workdir, "status", "--porcelain=v1", "--untracked-files=all"],
+        workdir,
+        {
+          trim: false,
+        },
+      ),
+      capture(["git", "-C", workdir, "diff", "HEAD"], workdir, { trim: false }),
+    ]);
+    for (const p of parts) hash.update(`${p.stdout}\0`);
+  } else {
+    hashDirEntries(workdir, "", hash);
+  }
+  return hash.digest("hex");
+}
+
+async function snapshotMemoryState(memory: TaskMemory): Promise<string> {
+  const hash = createHash("sha256");
+  const status = await capture(
+    ["git", "-C", memory.repo, "status", "--porcelain=v1", "--untracked-files=all"],
+    memory.repo,
+    { trim: false },
+  );
+  hash.update(`${status.stdout}\0`);
+  const filePath = join(memory.repo, memory.file);
+  if (existsSync(filePath)) {
+    hash.update(readFileSync(filePath));
+  } else {
+    hash.update("<missing>");
+  }
+  return hash.digest("hex");
 }
 
 export interface RunTaskOptions {
@@ -90,13 +161,12 @@ export async function runTask(opts: RunTaskOptions): Promise<number> {
       }
     }
 
-    let memoryContent: string | null = null;
+    let preparedMemory: PreparedMemory | null = null;
     if (config.memory) {
       const memLock = await acquireLockWithWait(memoryLockPath(stateDir, config.memory.repo));
       activeMemLock = memLock;
       try {
-        const prepared = await prepareMemory(config.memory, { warn });
-        memoryContent = prepared.content;
+        preparedMemory = await prepareMemory(config.memory, { warn });
       } finally {
         memLock.release();
         activeMemLock = null;
@@ -113,7 +183,7 @@ export async function runTask(opts: RunTaskOptions): Promise<number> {
       nowIso: new Date().toISOString(),
       workdir,
       eventContent,
-      memoryContent,
+      memoryContent: preparedMemory?.content ?? null,
     });
 
     log(`エージェント開始: candidates=${chain.map(formatInvocation).join(" -> ")}`);
@@ -126,6 +196,9 @@ export async function runTask(opts: RunTaskOptions): Promise<number> {
         error(`タスクがタイムアウト (${config.timeoutSec}s) した`);
         break;
       }
+      const beforeWorkdir = await snapshotWorkdir(workdir);
+      const beforeMemory = config.memory ? await snapshotMemoryState(config.memory) : "";
+
       log(`-> ${formatInvocation(inv)}`);
       const adapter = getAgentAdapter(inv.agent);
       const r = await run(adapter.buildArgv(inv, prompt), {
@@ -147,6 +220,14 @@ export async function runTask(opts: RunTaskOptions): Promise<number> {
         break;
       }
       if (out.failure === "unavailable") {
+        const afterWorkdir = await snapshotWorkdir(workdir);
+        const afterMemory = config.memory ? await snapshotMemoryState(config.memory) : "";
+        if (afterWorkdir !== beforeWorkdir || afterMemory !== beforeMemory) {
+          error(
+            `${formatInvocation(inv)}: 作業ツリーまたは記憶ファイルを変更した後に利用不能 (exit ${r.code}) となったため別候補へ切り替えない`,
+          );
+          break;
+        }
         warn(`${formatInvocation(inv)}: 利用不能 (exit ${r.code}) のため次候補へ切り替える`);
         continue;
       }
@@ -155,6 +236,16 @@ export async function runTask(opts: RunTaskOptions): Promise<number> {
     }
 
     if (!agentOk) {
+      if (config.memory && preparedMemory) {
+        const memLock = await acquireLockWithWait(memoryLockPath(stateDir, config.memory.repo));
+        activeMemLock = memLock;
+        try {
+          rollbackFailedMemory(config.memory, preparedMemory, { log });
+        } finally {
+          memLock.release();
+          activeMemLock = null;
+        }
+      }
       return 1;
     }
 

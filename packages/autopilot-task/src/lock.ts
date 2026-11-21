@@ -40,6 +40,30 @@ export type TryLockResult =
   | { acquired: true; handle: LockHandle }
   | { acquired: false; pid: number | null };
 
+function currentBootId(): string | null {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function procStartTime(pid: number): string | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const rparen = stat.lastIndexOf(")");
+    if (rparen === -1) return null;
+    const fields = stat
+      .slice(rparen + 2)
+      .trim()
+      .split(/\s+/);
+    // /proc/<pid>/stat の 3 番目 (state) が fields[0]、22 番目 (starttime) が fields[19]
+    return fields[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -50,23 +74,44 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-function parseLockFile(text: string): { pid: number | null; token: string | null } {
-  const lines = text.trim().split("\n");
+interface LockInfo {
+  pid: number | null;
+  token: string | null;
+  bootId: string | null;
+  startTime: string | null;
+}
+
+function parseLockFile(text: string): LockInfo {
+  const lines = text.trimEnd().split("\n");
   const pid = Number(lines[0]);
   return {
     pid: Number.isInteger(pid) && pid > 0 ? pid : null,
     token: lines[1]?.trim() || null,
+    bootId: lines[2]?.trim() || null,
+    startTime: lines[3]?.trim() || null,
   };
+}
+
+/** 既存ロックの保持プロセスが現在も同一起動・同一プロセスとして生きているか判定する。 */
+function isLockHolderAlive(existing: LockInfo): boolean {
+  if (existing.pid === null || !isPidAlive(existing.pid)) return false;
+  const bootId = currentBootId();
+  if (existing.bootId && bootId && existing.bootId !== bootId) return false;
+  const startTime = procStartTime(existing.pid);
+  if (existing.startTime && startTime && existing.startTime !== startTime) return false;
+  return true;
 }
 
 /**
  * 排他ロックファイルを取得する。
- * 一時ファイルを作って hardlink で原子的に配置し、古いロック（死んだ PID）があれば掃除して取り直す。
+ * PID に加えて boot_id とプロセス開始時刻を記録し、再起動や PID 再利用による古いロックも回収する。
  */
 export function tryAcquireLock(lockPath: string): TryLockResult {
   mkdirSync(dirname(lockPath), { recursive: true });
   const token = randomUUID();
-  const payload = `${process.pid}\n${token}\n`;
+  const bootId = currentBootId() ?? "";
+  const startTime = procStartTime(process.pid) ?? "";
+  const payload = `${process.pid}\n${token}\n${bootId}\n${startTime}\n`;
 
   for (let attempt = 0; attempt < 5; attempt++) {
     const tmpPath = `${lockPath}.${process.pid}.${token}.tmp`;
@@ -98,10 +143,10 @@ export function tryAcquireLock(lockPath: string): TryLockResult {
         continue;
       }
       const existing = parseLockFile(existingText);
-      if (existing.pid !== null && isPidAlive(existing.pid)) {
+      if (isLockHolderAlive(existing)) {
         return { acquired: false, pid: existing.pid };
       }
-      // 死んだプロセスの古いロックだけを掃除する。別プロセスが直前に張り替えていたら消さない。
+      // 死んだプロセス／別ブート／PID 再利用の古いロックだけを掃除する。
       try {
         if (readFileSync(lockPath, "utf8") === existingText) {
           unlinkSync(lockPath);

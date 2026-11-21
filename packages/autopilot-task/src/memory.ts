@@ -1,7 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { capture } from "../../autopilot-run/src/exec.ts";
 import type { TaskMemory } from "./config.ts";
+
+export const GIT_NETWORK_TIMEOUT_MS = 60_000;
+const GIT_NET_ENV = { GIT_TERMINAL_PROMPT: "0" };
 
 /** テキストの末尾 maxLines 行を返す。 */
 export function tailLines(text: string, maxLines: number): string {
@@ -11,11 +14,18 @@ export function tailLines(text: string, maxLines: number): string {
   return lines.slice(-maxLines).join("\n");
 }
 
+export interface PreparedMemory {
+  filePath: string;
+  content: string;
+  createdNew: boolean;
+  preAgentContent: string;
+}
+
 /** 記憶リポジトリを確認・最新化し、対象ファイルが無ければ初期作成して末尾 maxLines 行を読む。 */
 export async function prepareMemory(
   memory: TaskMemory,
-  opts: { warn: (msg: string) => void },
-): Promise<{ filePath: string; content: string }> {
+  opts: { warn: (msg: string) => void; timeoutMs?: number },
+): Promise<PreparedMemory> {
   if (!existsSync(memory.repo) || !statSync(memory.repo).isDirectory()) {
     throw new Error(`memory.repo ディレクトリが存在しない: ${memory.repo}`);
   }
@@ -27,20 +37,54 @@ export async function prepareMemory(
     throw new Error(`memory.repo が git リポジトリではない: ${memory.repo}`);
   }
 
-  const pull = await capture(["git", "-C", memory.repo, "pull", "--ff-only"], memory.repo);
-  if (pull.code !== 0) {
+  const netTimeoutMs = opts.timeoutMs ?? GIT_NETWORK_TIMEOUT_MS;
+  const pull = await capture(["git", "-C", memory.repo, "pull", "--ff-only"], memory.repo, {
+    timeoutMs: netTimeoutMs,
+    env: GIT_NET_ENV,
+  });
+  if (pull.timedOut) {
+    opts.warn(`memory.repo の git pull --ff-only がタイムアウトしたためそのまま続行する`);
+  } else if (pull.code !== 0) {
     opts.warn(
       `memory.repo の git pull --ff-only に失敗したためそのまま続行する: ${pull.stderr || pull.stdout}`,
     );
   }
 
   const filePath = join(memory.repo, memory.file);
+  let createdNew = false;
   if (!existsSync(filePath)) {
     mkdirSync(dirname(filePath), { recursive: true });
     writeFileSync(filePath, "");
+    createdNew = true;
   }
   const raw = readFileSync(filePath, "utf8");
-  return { filePath, content: tailLines(raw, memory.maxLines) };
+  return {
+    filePath,
+    content: tailLines(raw, memory.maxLines),
+    createdNew,
+    preAgentContent: raw,
+  };
+}
+
+/** エージェント失敗時に、途中まで書かれた記憶ファイルや空の初期ファイルを元に戻す。 */
+export function rollbackFailedMemory(
+  memory: TaskMemory,
+  prepared: Pick<PreparedMemory, "createdNew" | "preAgentContent">,
+  opts: { log: (msg: string) => void },
+): void {
+  const filePath = join(memory.repo, memory.file);
+  if (prepared.createdNew) {
+    if (existsSync(filePath)) {
+      rmSync(filePath, { force: true });
+      opts.log(`失敗した実行で作成した記憶ファイルを削除した: ${memory.file}`);
+    }
+    return;
+  }
+  if (!existsSync(filePath) || readFileSync(filePath, "utf8") !== prepared.preAgentContent) {
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, prepared.preAgentContent);
+    opts.log(`失敗した実行による記憶ファイルの変更を元に戻した: ${memory.file}`);
+  }
 }
 
 export interface SyncMemoryResult {
@@ -53,8 +97,9 @@ export interface SyncMemoryResult {
 export async function syncMemory(
   memory: TaskMemory,
   taskName: string,
-  opts: { log: (msg: string) => void; error: (msg: string) => void },
+  opts: { log: (msg: string) => void; error: (msg: string) => void; timeoutMs?: number },
 ): Promise<SyncMemoryResult> {
+  const netTimeoutMs = opts.timeoutMs ?? GIT_NETWORK_TIMEOUT_MS;
   const status = await capture(
     [
       "git",
@@ -104,7 +149,12 @@ export async function syncMemory(
         const remoteHead = await capture(
           ["git", "-C", memory.repo, "ls-remote", "--heads", "origin", branch],
           memory.repo,
+          { timeoutMs: netTimeoutMs, env: GIT_NET_ENV },
         );
+        if (remoteHead.timedOut) {
+          opts.error("memory.repo の git ls-remote がタイムアウトしたため commit/push を中断した");
+          return { ok: false, committed: false, pushed: false };
+        }
         if (remoteHead.code === 0 && remoteHead.stdout.length > 0) {
           pullArgs = [
             "git",
@@ -121,11 +171,15 @@ export async function syncMemory(
     }
 
     if (pullArgs) {
-      const pullRes = await capture(pullArgs, memory.repo);
-      if (pullRes.code !== 0) {
+      const pullRes = await capture(pullArgs, memory.repo, {
+        timeoutMs: netTimeoutMs,
+        env: GIT_NET_ENV,
+      });
+      if (pullRes.timedOut || pullRes.code !== 0) {
         await capture(["git", "-C", memory.repo, "rebase", "--abort"], memory.repo);
+        const detail = pullRes.timedOut ? "タイムアウト" : pullRes.stderr || pullRes.stdout;
         opts.error(
-          `memory.repo の git pull --rebase --autostash に失敗したため commit/push を中断した: ${pullRes.stderr || pullRes.stdout}`,
+          `memory.repo の git pull --rebase --autostash に失敗したため commit/push を中断した: ${detail}`,
         );
         return { ok: false, committed: false, pushed: false };
       }
@@ -167,6 +221,17 @@ export async function syncMemory(
     memory.repo,
   );
   if (commitRes.code !== 0) {
+    // pre-commit 等で拒否された変更（秘密情報など）が次回のプロンプト・コミットに混入しないよう作業ツリーから取り除く
+    await capture(["git", "-C", memory.repo, "reset", "HEAD", "--", memory.file], memory.repo);
+    const tracked = await capture(
+      ["git", "-C", memory.repo, "ls-files", "--error-unmatch", "--", memory.file],
+      memory.repo,
+    );
+    if (tracked.code === 0) {
+      await capture(["git", "-C", memory.repo, "checkout", "--", memory.file], memory.repo);
+    } else {
+      rmSync(join(memory.repo, memory.file), { force: true });
+    }
     opts.error(`memory.repo の git commit に失敗した: ${commitRes.stderr || commitRes.stdout}`);
     return { ok: false, committed: false, pushed: false };
   }
@@ -176,9 +241,13 @@ export async function syncMemory(
     const pushArgs = hasUpstream
       ? ["git", "-C", memory.repo, "push"]
       : ["git", "-C", memory.repo, "push", "-u", "origin", "HEAD"];
-    const pushRes = await capture(pushArgs, memory.repo);
-    if (pushRes.code !== 0) {
-      opts.error(`memory.repo の git push に失敗した: ${pushRes.stderr || pushRes.stdout}`);
+    const pushRes = await capture(pushArgs, memory.repo, {
+      timeoutMs: netTimeoutMs,
+      env: GIT_NET_ENV,
+    });
+    if (pushRes.timedOut || pushRes.code !== 0) {
+      const detail = pushRes.timedOut ? "タイムアウト" : pushRes.stderr || pushRes.stdout;
+      opts.error(`memory.repo の git push に失敗した: ${detail}`);
       return { ok: false, committed: true, pushed: false };
     }
     opts.log(`記憶を push した: ${memory.file}`);

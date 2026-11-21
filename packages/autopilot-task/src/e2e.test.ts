@@ -311,6 +311,8 @@ describe("autopilot-task E2E", () => {
       const rSecret = await w.runCli(["run", "--config", cfg]);
       expect(rSecret.code).toBe(1);
       expect(git(origin, "log", "-1", "--pretty=%s")).toBe("chore(memory): update mem-task");
+      // 秘密情報で拒否された内容が作業ツリーに残っていないこと
+      expect(readFileSync(memTarget, "utf8")).toBe("2026-11-22: 正常に記録\n");
     },
     TIMEOUT,
   );
@@ -374,6 +376,59 @@ writeFileSync(${JSON.stringify(memTarget)}, "agent-local-conflict\\n");
       expect(existsSync(join(memRepo, ".git", "rebase-merge"))).toBe(false);
       expect(existsSync(join(memRepo, ".git", "rebase-apply"))).toBe(false);
       expect(git(origin, "log", "-1", "--pretty=%s")).toBe("remote conflict");
+      // rebase --abort 後にエージェントの書き込みと未 push コミットが失われていないこと
+      expect(readFileSync(memTarget, "utf8")).toBe("agent-local-conflict\n");
+      expect(git(memRepo, "log", "-1", "--pretty=%s")).toBe("local unpushed");
+    },
+    TIMEOUT,
+  );
+
+  test(
+    "unavailable の前に記憶ファイルや作業ツリーを変更していたら別候補へ切り替えず記憶を元に戻す",
+    async () => {
+      const w = setupWorld();
+      const memRepo = join(w.root, "memory");
+      mkdirSync(memRepo);
+      git(memRepo, "init", "-b", "main");
+      git(memRepo, "config", "user.name", "bot");
+      git(memRepo, "config", "user.email", "bot@example.com");
+      writeFileSync(join(memRepo, "README.md"), "# mem\n");
+      git(memRepo, "add", "README.md");
+      git(memRepo, "commit", "-m", "init");
+
+      const modelsFile = join(w.root, "models.yaml");
+      writeFileSync(modelsFile, "roles:\n  impl: [agy, codex]\n");
+      const memTarget = join(memRepo, "tasks", "partial.md");
+      writeFileSync(
+        w.scriptPath,
+        JSON.stringify({
+          agy: {
+            code: 1,
+            stderr: "You've hit your session limit",
+            writeMemoryPath: memTarget,
+            writeMemoryContent: "partial write before limit\n",
+          },
+          codex: { code: 0, stdout: "should not run" },
+        }),
+      );
+
+      const cfg = join(w.root, "partial-unavail.json");
+      writeFileSync(
+        cfg,
+        JSON.stringify({
+          name: "partial-unavail",
+          soulFile: w.soul,
+          trigger: { type: "cron", schedule: "daily" },
+          memory: { repo: memRepo, file: "tasks/partial.md" },
+        }),
+      );
+
+      const r = await w.runCli(["run", "--config", cfg], { AUTOPILOT_MODELS: modelsFile });
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain("別候補へ切り替えない");
+      expect(w.readCalls().map((c) => c.agent)).toEqual(["agy"]);
+      // 失敗した実行で新規作成した記憶ファイルはロールバックされて残らないこと
+      expect(existsSync(memTarget)).toBe(false);
     },
     TIMEOUT,
   );

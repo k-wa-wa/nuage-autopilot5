@@ -196,7 +196,7 @@ in
           options = {
             soul = lib.mkOption {
               type = lib.types.path;
-              description = "タスクの指示書（SOUL.md）のパス。";
+              description = "タスクの指示書（SOUL.md）のパス。Nix パスリテラル（例: ./SOUL.md）またはストアパスで指定する。";
             };
             agent = lib.mkOption {
               type = lib.types.nullOr (
@@ -299,10 +299,18 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = lib.mapAttrsToList (name: task: {
-      assertion = task.memory == null || task.memory.repo != null || cfg.taskDefaults.memoryRepo != null;
-      message = "programs.autopilot5.tasks.${name}.memory.repo または programs.autopilot5.taskDefaults.memoryRepo を指定すること";
-    }) cfg.tasks;
+    assertions = lib.concatLists (
+      lib.mapAttrsToList (name: task: [
+        {
+          assertion = lib.hasPrefix builtins.storeDir "${task.soul}";
+          message = "programs.autopilot5.tasks.${name}.soul は文字列パスではなく Nix パスリテラル（例: ./SOUL.md）またはストアパスで指定すること";
+        }
+        {
+          assertion = task.memory == null || task.memory.repo != null || cfg.taskDefaults.memoryRepo != null;
+          message = "programs.autopilot5.tasks.${name}.memory.repo または programs.autopilot5.taskDefaults.memoryRepo を指定すること";
+        }
+      ]) cfg.tasks
+    );
 
     # atelier サーバー上のエージェントが叩く gh が安全ラッパーを経由するように高優先度で配備
     environment.systemPackages = [ (lib.hiPrio cfg.package) ];
@@ -326,6 +334,15 @@ in
       name: task:
       let
         envFile = if task.envFile != null then task.envFile else cfg.taskDefaults.envFile;
+        resolvedTimeoutSec =
+          if task.timeoutSec != null then task.timeoutSec else cfg.taskDefaults.timeoutSec;
+        resolvedPrecheckTimeoutSec =
+          if task.precheck == null then
+            0
+          else if task.precheck.timeoutSec != null then
+            task.precheck.timeoutSec
+          else
+            cfg.taskDefaults.precheckTimeoutSec;
       in
       lib.nameValuePair "autopilot-task-${name}" {
         description = "autopilot5 task: ${name}";
@@ -340,6 +357,7 @@ in
         ];
         serviceConfig = {
           Type = "oneshot";
+          TimeoutStartSec = resolvedTimeoutSec + resolvedPrecheckTimeoutSec + 180;
           ExecStart = "${cfg.package}/bin/autopilot-task run --config ${checkedTaskConfig name task}";
         }
         // lib.optionalAttrs (envFile != null) {

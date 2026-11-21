@@ -38,6 +38,36 @@ export interface RunResult {
   timedOut?: boolean;
 }
 
+function attachGroupTimeout(
+  pid: number | undefined,
+  timeoutMs: number | undefined,
+  isSettled: () => boolean,
+  onTimeout: () => void,
+): () => void {
+  if (timeoutMs === undefined || timeoutMs <= 0) return () => {};
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutTimer = setTimeout(() => {
+    onTimeout();
+    if (!pid) return;
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {}
+    killTimer = setTimeout(() => {
+      if (!isSettled()) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {}
+      }
+    }, 500);
+    killTimer.unref();
+  }, timeoutMs);
+  timeoutTimer.unref();
+  return () => {
+    clearTimeout(timeoutTimer);
+    if (killTimer) clearTimeout(killTimer);
+  };
+}
+
 export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
   const [cmd, ...args] = argv;
   if (!cmd) throw new Error("empty argv");
@@ -54,28 +84,14 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
     const stderr: Buffer[] = [];
     let timedOut = false;
     let settled = false;
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
-
-    if (opts.timeoutMs !== undefined && opts.timeoutMs > 0) {
-      timeoutTimer = setTimeout(() => {
+    const clearTimers = attachGroupTimeout(
+      child.pid,
+      opts.timeoutMs,
+      () => settled,
+      () => {
         timedOut = true;
-        if (child.pid) {
-          try {
-            process.kill(-child.pid, "SIGTERM");
-          } catch {}
-          killTimer = setTimeout(() => {
-            if (!settled && child.pid) {
-              try {
-                process.kill(-child.pid, "SIGKILL");
-              } catch {}
-            }
-          }, 500);
-          killTimer.unref();
-        }
-      }, opts.timeoutMs);
-      timeoutTimer.unref();
-    }
+      },
+    );
 
     // 窓口が進捗を読めるよう、溜めずに逐次書き出す。
     child.stdout.on("data", (chunk: Buffer) => {
@@ -89,8 +105,7 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
     const done = (code: number) => {
       if (settled) return;
       settled = true;
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (killTimer) clearTimeout(killTimer);
+      clearTimers();
       if (child.pid) active.delete(child.pid);
       resolve({
         code,
@@ -110,23 +125,59 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
 }
 
 /** 出力を取るだけの短いコマンド（git / gh）。 */
-export async function capture(
+export function capture(
   argv: string[],
   cwd: string,
-  opts: { trim?: boolean } = {},
+  opts: { trim?: boolean; timeoutMs?: number; env?: Record<string, string> } = {},
 ): Promise<RunResult & { stderr: string }> {
   const [cmd, ...args] = argv;
   if (!cmd) throw new Error("empty argv");
-  const proc = Bun.spawn([cmd, ...args], { cwd, env: cleanEnv(), stdout: "pipe", stderr: "pipe" });
-  const [out, err] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return {
-    code: await proc.exited,
-    stdout: opts.trim === false ? out : out.trim(),
-    stderr: err.trim(),
-  };
+  const env = opts.env ? { ...cleanEnv(), ...opts.env } : cleanEnv();
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let timedOut = false;
+    let settled = false;
+    const clearTimers = attachGroupTimeout(
+      child.pid,
+      opts.timeoutMs,
+      () => settled,
+      () => {
+        timedOut = true;
+      },
+    );
+
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+
+    const done = (code: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      const outText = Buffer.concat(stdout).toString("utf8");
+      const errText = Buffer.concat(stderr).toString("utf8");
+      resolve({
+        code,
+        stdout: opts.trim === false ? outText : outText.trim(),
+        stderr: errText.trim(),
+        ...(timedOut ? { timedOut: true } : {}),
+      });
+    };
+
+    child.on("error", (e) => {
+      stderr.push(Buffer.from(e.message));
+      done(127);
+    });
+    child.on("close", (code, signal) =>
+      done(code ?? (signal ? 128 + constants.signals[signal] : 1)),
+    );
+  });
 }
 
 /** 実行中の子をプロセスグループごと止める。 */

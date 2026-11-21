@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { prepareMemory, syncMemory, tailLines } from "./memory.ts";
+import { prepareMemory, rollbackFailedMemory, syncMemory, tailLines } from "./memory.ts";
 
 let dir: string | null = null;
 afterEach(() => {
@@ -189,7 +189,7 @@ describe("prepareMemory & syncMemory", () => {
     expect(git(repo, "log", "-1", "--pretty=%s")).toBe("remote change");
   });
 
-  test("pre-commit フックが拒否したら commit/push せずエラーを返す", async () => {
+  test("pre-commit フックが拒否したら unstage・作業ツリー復旧してエラーを返す", async () => {
     const { repo } = setupMemRepo(true);
     const hook = join(repo, ".git", "hooks", "pre-commit");
     writeFileSync(hook, "#!/bin/sh\necho 'secret blocked' >&2\nexit 1\n");
@@ -204,5 +204,67 @@ describe("prepareMemory & syncMemory", () => {
     });
     expect(syncRes).toEqual({ ok: false, committed: false, pushed: false });
     expect(errors.some((e) => e.includes("secret blocked"))).toBe(true);
+    // 拒否された秘密情報がステージや作業ツリーに残らないこと
+    expect(existsSync(join(repo, "secret.md"))).toBe(false);
+    expect(git(repo, "status", "--porcelain")).toBe("");
+  });
+
+  test("失敗時のロールバックは新規作成した空ファイルや途中の変更を元に戻す", async () => {
+    const { repo } = setupMemRepo(false);
+    const logs: string[] = [];
+    const memNew = { repo, file: "new/mem.md", maxLines: 200 };
+    const prepNew = await prepareMemory(memNew, { warn: () => {} });
+    expect(prepNew.createdNew).toBe(true);
+    writeFileSync(prepNew.filePath, "partial-dirty\n");
+    rollbackFailedMemory(memNew, prepNew, { log: (m) => logs.push(m) });
+    expect(existsSync(prepNew.filePath)).toBe(false);
+
+    // 既存ファイルの途中変更も元へ戻る
+    writeFileSync(join(repo, "existing.md"), "clean\n");
+    git(repo, "add", "existing.md");
+    git(repo, "commit", "-m", "add existing");
+    const memOld = { repo, file: "existing.md", maxLines: 200 };
+    const prepOld = await prepareMemory(memOld, { warn: () => {} });
+    expect(prepOld.createdNew).toBe(false);
+    writeFileSync(prepOld.filePath, "broken\n");
+    rollbackFailedMemory(memOld, prepOld, { log: (m) => logs.push(m) });
+    expect(readFileSync(prepOld.filePath, "utf8")).toBe("clean\n");
+  });
+
+  test("git ネットワーク操作がタイムアウトを超えたらハングせずエラーで抜ける", async () => {
+    const { repo } = setupMemRepo(false);
+    const binDir = join(repo, "..", "fake-git-bin");
+    mkdirSync(binDir);
+    const fakeGit = join(binDir, "git");
+    const realGit = Bun.which("git") ?? "git";
+    writeFileSync(
+      fakeGit,
+      `#!/bin/sh
+if [ "$1" = "-C" ]; then shift 2; fi
+case "$1" in
+  status) echo "?? slow.md" ;;
+  remote) echo "origin" ;;
+  rev-parse) echo "origin/main" ;;
+  pull) sleep 5 ;;
+  *) exec ${realGit} "$@" ;;
+esac
+`,
+    );
+    chmodSync(fakeGit, 0o755);
+
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${prevPath ?? ""}`;
+    try {
+      const errors: string[] = [];
+      const res = await syncMemory({ repo, file: "slow.md", maxLines: 200 }, "slow", {
+        log: () => {},
+        error: (m) => errors.push(m),
+        timeoutMs: 150,
+      });
+      expect(res).toEqual({ ok: false, committed: false, pushed: false });
+      expect(errors.some((e) => e.includes("タイムアウト"))).toBe(true);
+    } finally {
+      process.env.PATH = prevPath;
+    }
   });
 });

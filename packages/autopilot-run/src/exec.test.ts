@@ -143,4 +143,11 @@ describe("capture", () => {
     const r = await capture([BUN, "-e", "console.log('  x  '); console.error('e')"], process.cwd());
     expect(r).toEqual({ code: 0, stdout: "x", stderr: "e" });
   });
+
+  test("timeoutMs を超えたら終了して timedOut を返す", async () => {
+    const r = await capture([BUN, "-e", "setTimeout(() => {}, 60000)"], process.cwd(), {
+      timeoutMs: 150,
+    });
+    expect(r.timedOut).toBe(true);
+  });
 });
