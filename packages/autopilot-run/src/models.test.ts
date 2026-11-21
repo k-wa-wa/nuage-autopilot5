@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { parseAgentSpec } from "./agents.ts";
 import {
   assignRoles,
+  DEFAULT_TASK_LEVEL,
   formatModelTable,
   loadModelTable,
   parseModelTable,
   resolveChain,
+  resolveTaskChain,
 } from "./models.ts";
 import { tempDir } from "./testing/helpers.ts";
 
@@ -216,5 +218,26 @@ describe("担当の優先順", () => {
     ]) {
       expect(() => parseModelTable(text)).toThrow(/roles/);
     }
+  });
+});
+
+describe("resolveTaskChain", () => {
+  const table = parseModelTable(
+    `${YAML}\nroles:\n  impl: [codex, claude]\ncodex:\n  standard: [x@medium]\n`,
+  );
+
+  test("既定段階は standard であり、agent が null なら roles.impl の順で候補を作る", () => {
+    expect(DEFAULT_TASK_LEVEL).toBe("standard");
+    expect(resolveTaskChain(null, DEFAULT_TASK_LEVEL, table)).toEqual([
+      { agent: "codex", model: "x", effort: "medium" },
+      { agent: "claude", model: "model-mid", effort: "medium" },
+    ]);
+  });
+
+  test("agent を指定したらその CLI だけの候補を作る", () => {
+    expect(resolveTaskChain("claude", "high", table)).toEqual([
+      { agent: "claude", model: "model-big", effort: "high" },
+    ]);
+    expect(resolveTaskChain("agy", "light", {})).toEqual([{ agent: "agy" }]);
   });
 });

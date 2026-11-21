@@ -27,12 +27,15 @@ export interface RunOptions {
   stdoutPath?: string;
   /** 標準エラー（と stdoutPath 未指定時の標準出力）の追記先。 */
   logPath: string;
+  /** 指定ミリ秒を超えたら子プロセスグループごと停止する。 */
+  timeoutMs?: number;
 }
 
 export interface RunResult {
   code: number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
 export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
@@ -49,6 +52,31 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
     if (child.pid) active.add(child.pid);
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let timedOut = false;
+    let settled = false;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+
+    if (opts.timeoutMs !== undefined && opts.timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        timedOut = true;
+        if (child.pid) {
+          try {
+            process.kill(-child.pid, "SIGTERM");
+          } catch {}
+          killTimer = setTimeout(() => {
+            if (!settled && child.pid) {
+              try {
+                process.kill(-child.pid, "SIGKILL");
+              } catch {}
+            }
+          }, 500);
+          killTimer.unref();
+        }
+      }, opts.timeoutMs);
+      timeoutTimer.unref();
+    }
+
     // 窓口が進捗を読めるよう、溜めずに逐次書き出す。
     child.stdout.on("data", (chunk: Buffer) => {
       stdout.push(chunk);
@@ -59,11 +87,16 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
       appendFileSync(opts.logPath, chunk);
     });
     const done = (code: number) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
       if (child.pid) active.delete(child.pid);
       resolve({
         code,
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
+        ...(timedOut ? { timedOut: true } : {}),
       });
     };
     child.on("error", (e) => {
