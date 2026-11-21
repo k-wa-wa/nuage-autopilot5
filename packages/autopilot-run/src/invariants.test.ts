@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { buildTaskPrompt } from "../../autopilot-task/src/prompt.ts";
 import { AGENTS, buildArgv } from "./agents.ts";
 import { assignRoles } from "./models.ts";
 import { runPipeline } from "./pipeline.ts";
@@ -13,27 +14,42 @@ import { pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
  */
 
 const SRC = import.meta.dir;
-const sources = readdirSync(SRC)
-  .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
-  .map((f) => ({ name: f, text: readFileSync(join(SRC, f), "utf8") }));
+const TASK_SRC = join(SRC, "../../autopilot-task/src");
+const readSources = (dir: string) =>
+  readdirSync(dir)
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
+    .map((f) => ({ name: f, text: readFileSync(join(dir, f), "utf8") }));
+
+const sources = readSources(SRC);
+const taskSources = readSources(TASK_SRC);
 
 /** pattern を含むソースファイル名（テストを除く）。 */
 const filesContaining = (pattern: RegExp) =>
   sources.filter((s) => pattern.test(s.text)).map((s) => s.name);
+
+const taskFilesContaining = (pattern: RegExp) =>
+  taskSources.filter((s) => pattern.test(s.text)).map((s) => s.name);
 
 describe("責務が 1 箇所に閉じている", () => {
   test("エージェント CLI の起動方法は agents.ts だけが知る", () => {
     expect(
       filesContaining(/--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox/),
     ).toEqual(["agents.ts"]);
+    expect(
+      taskFilesContaining(
+        /--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox/,
+      ),
+    ).toEqual([]);
   });
 
   test("gh の呼び出しは github.ts だけが行う", () => {
     expect(filesContaining(/\["gh"/)).toEqual(["github.ts"]);
+    expect(taskFilesContaining(/\["gh"/)).toEqual([]);
   });
 
   test("Orca の環境変数を扱うのは exec.ts だけ", () => {
     expect(filesContaining(/ORCA_/)).toEqual(["exec.ts"]);
+    expect(taskFilesContaining(/ORCA_/)).toEqual([]);
   });
 
   test("CI の判定（pass / fail の解釈）は ci.ts だけが行う", () => {
@@ -43,6 +59,7 @@ describe("責務が 1 箇所に閉じている", () => {
 
   test("作業ごとの賢さ（段階）は models.ts だけが決める", () => {
     expect(filesContaining(/"(standard|light)"/)).toEqual(["models.ts"]);
+    expect(taskFilesContaining(/"(standard|light)"/)).toEqual([]);
   });
 
   test("流れ（pipeline.ts）は子プロセスもファイルも直接触らない（依存は Deps で受ける）", () => {
@@ -87,6 +104,32 @@ describe("禁止事項はすべての自律ターンに届く", () => {
       expect(p).toContain("質問しない");
     });
   }
+
+  test("autopilot-task: マージ・クローズ・既定ブランチへの直接 push・機密情報の投稿を禁じ、質問させない", () => {
+    const p = buildTaskPrompt({
+      config: {
+        name: "inv-task",
+        soulFile: "/tmp/SOUL.md",
+        agent: null,
+        level: "standard",
+        trigger: { type: "cron", schedule: "daily" },
+        precheck: null,
+        memory: null,
+        workdir: null,
+        timeoutSec: 3600,
+      },
+      soulText: "# SOUL",
+      nowIso: "2026-11-22T00:00:00.000Z",
+      workdir: "/tmp/work",
+      eventContent: null,
+      memoryContent: null,
+    });
+    expect(p).toContain("PR のマージ");
+    expect(p).toContain("Issue・PR のクローズ");
+    expect(p).toContain("既定ブランチへの直接 push");
+    expect(p).toContain("機密情報");
+    expect(p).toContain("質問しない");
+  });
 
   test("レビュー担当には何も書かせない", () => {
     expect(
@@ -178,10 +221,17 @@ describe("モデル名は models.yaml だけに書く", () => {
     );
 
   test("コード（テストも含む）に実在のモデル名を書かない", () => {
-    const all = readdirSync(SRC, { recursive: true })
-      .map(String)
-      .filter((f) => f.endsWith(".ts") && f !== "invariants.test.ts");
-    const hits = all.filter((f) => REAL_MODEL.test(readFileSync(join(SRC, f), "utf8")));
+    const all = [
+      ...readdirSync(SRC, { recursive: true })
+        .map(String)
+        .filter((f) => f.endsWith(".ts") && f !== "invariants.test.ts")
+        .map((f) => join(SRC, f)),
+      ...readdirSync(TASK_SRC, { recursive: true })
+        .map(String)
+        .filter((f) => f.endsWith(".ts"))
+        .map((f) => join(TASK_SRC, f)),
+    ];
+    const hits = all.filter((f) => REAL_MODEL.test(readFileSync(f, "utf8")));
     expect(hits).toEqual([]);
   });
 

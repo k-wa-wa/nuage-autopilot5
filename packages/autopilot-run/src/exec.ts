@@ -27,12 +27,45 @@ export interface RunOptions {
   stdoutPath?: string;
   /** 標準エラー（と stdoutPath 未指定時の標準出力）の追記先。 */
   logPath: string;
+  /** 指定ミリ秒を超えたら子プロセスグループごと停止する。 */
+  timeoutMs?: number;
 }
 
 export interface RunResult {
   code: number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
+}
+
+function attachGroupTimeout(
+  pid: number | undefined,
+  timeoutMs: number | undefined,
+  isSettled: () => boolean,
+  onTimeout: () => void,
+): () => void {
+  if (timeoutMs === undefined || timeoutMs <= 0) return () => {};
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutTimer = setTimeout(() => {
+    onTimeout();
+    if (!pid) return;
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {}
+    killTimer = setTimeout(() => {
+      if (!isSettled()) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {}
+      }
+    }, 500);
+    killTimer.unref();
+  }, timeoutMs);
+  timeoutTimer.unref();
+  return () => {
+    clearTimeout(timeoutTimer);
+    if (killTimer) clearTimeout(killTimer);
+  };
 }
 
 export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
@@ -49,6 +82,17 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
     if (child.pid) active.add(child.pid);
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let timedOut = false;
+    let settled = false;
+    const clearTimers = attachGroupTimeout(
+      child.pid,
+      opts.timeoutMs,
+      () => settled,
+      () => {
+        timedOut = true;
+      },
+    );
+
     // 窓口が進捗を読めるよう、溜めずに逐次書き出す。
     child.stdout.on("data", (chunk: Buffer) => {
       stdout.push(chunk);
@@ -59,11 +103,15 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
       appendFileSync(opts.logPath, chunk);
     });
     const done = (code: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
       if (child.pid) active.delete(child.pid);
       resolve({
         code,
         stdout: Buffer.concat(stdout).toString("utf8"),
         stderr: Buffer.concat(stderr).toString("utf8"),
+        ...(timedOut ? { timedOut: true } : {}),
       });
     };
     child.on("error", (e) => {
@@ -77,23 +125,59 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
 }
 
 /** 出力を取るだけの短いコマンド（git / gh）。 */
-export async function capture(
+export function capture(
   argv: string[],
   cwd: string,
-  opts: { trim?: boolean } = {},
+  opts: { trim?: boolean; timeoutMs?: number; env?: Record<string, string> } = {},
 ): Promise<RunResult & { stderr: string }> {
   const [cmd, ...args] = argv;
   if (!cmd) throw new Error("empty argv");
-  const proc = Bun.spawn([cmd, ...args], { cwd, env: cleanEnv(), stdout: "pipe", stderr: "pipe" });
-  const [out, err] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return {
-    code: await proc.exited,
-    stdout: opts.trim === false ? out : out.trim(),
-    stderr: err.trim(),
-  };
+  const env = opts.env ? { ...cleanEnv(), ...opts.env } : cleanEnv();
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let timedOut = false;
+    let settled = false;
+    const clearTimers = attachGroupTimeout(
+      child.pid,
+      opts.timeoutMs,
+      () => settled,
+      () => {
+        timedOut = true;
+      },
+    );
+
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+
+    const done = (code: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+      const outText = Buffer.concat(stdout).toString("utf8");
+      const errText = Buffer.concat(stderr).toString("utf8");
+      resolve({
+        code,
+        stdout: opts.trim === false ? outText : outText.trim(),
+        stderr: errText.trim(),
+        ...(timedOut ? { timedOut: true } : {}),
+      });
+    };
+
+    child.on("error", (e) => {
+      stderr.push(Buffer.from(e.message));
+      done(127);
+    });
+    child.on("close", (code, signal) =>
+      done(code ?? (signal ? 128 + constants.signals[signal] : 1)),
+    );
+  });
 }
 
 /** 実行中の子をプロセスグループごと止める。 */

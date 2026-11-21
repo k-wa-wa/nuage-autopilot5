@@ -74,6 +74,50 @@ let
     map (d: "d ${home}/${d} 0700 ${cfg.user} ${group} -") dirs
     ++ [ "L+ ${home}/${t.rules} - - - - ${if agent == "codex" then codexRules else rules}" ]
     ++ map (s: "L+ ${home}/${t.skills}/${s} - - - - ${skills}/${s}") skillNames;
+
+  checkedTaskConfig =
+    name: task:
+    let
+      resolvedMemory =
+        if task.memory == null then
+          null
+        else
+          {
+            repo = if task.memory.repo != null then task.memory.repo else cfg.taskDefaults.memoryRepo;
+            inherit (task.memory) file maxLines;
+          };
+      resolvedPrecheck =
+        if task.precheck == null then
+          null
+        else
+          {
+            inherit (task.precheck) command;
+            timeoutSec =
+              if task.precheck.timeoutSec != null then
+                task.precheck.timeoutSec
+              else
+                cfg.taskDefaults.precheckTimeoutSec;
+          };
+      raw = pkgs.writeText "autopilot-task-${name}.json" (
+        builtins.toJSON {
+          inherit name;
+          soulFile = "${task.soul}";
+          inherit (task) agent level;
+          trigger = {
+            inherit (task.trigger) type schedule;
+          };
+          precheck = resolvedPrecheck;
+          memory = resolvedMemory;
+          workdir = if task.workdir != null then task.workdir else cfg.taskDefaults.workdir;
+          timeoutSec = if task.timeoutSec != null then task.timeoutSec else cfg.taskDefaults.timeoutSec;
+        }
+      );
+    in
+    pkgs.runCommand "autopilot-task-${name}-config.json" { } ''
+      export HOME=$TMPDIR
+      ${cfg.package}/bin/autopilot-task check-config --file ${raw}
+      cp ${raw} $out
+    '';
 in
 {
   options.programs.autopilot5 = {
@@ -115,9 +159,159 @@ in
       default = builtins.attrNames targets;
       description = "共通ルールとスキルを配るエージェント CLI。";
     };
+
+    taskDefaults = {
+      envFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "タスク用 systemd サービスに読み込む既定の EnvironmentFile パス。";
+      };
+      memoryRepo = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "タスクの記憶機能で使う既定の git リポジトリパス。";
+      };
+      workdir = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "タスクの既定の作業ディレクトリ。null 時はランナーがタスク専用ディレクトリを自動作成する。";
+      };
+      timeoutSec = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 3600;
+        description = "タスク実行の既定タイムアウト秒数。";
+      };
+      precheckTimeoutSec = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 60;
+        description = "precheck コマンドの既定タイムアウト秒数。";
+      };
+    };
+
+    tasks = lib.mkOption {
+      default = { };
+      description = "定期実行する自律タスクの定義。";
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = {
+            soul = lib.mkOption {
+              type = lib.types.path;
+              description = "タスクの指示書（SOUL.md）のパス。Nix パスリテラル（例: ./SOUL.md）またはストアパスで指定する。";
+            };
+            agent = lib.mkOption {
+              type = lib.types.nullOr (
+                lib.types.enum [
+                  "claude"
+                  "agy"
+                  "codex"
+                ]
+              );
+              default = null;
+              description = "使用するエージェント CLI。null 時は models.yaml の roles.impl 順で実行する。";
+            };
+            level = lib.mkOption {
+              type = lib.types.enum [
+                "high"
+                "standard"
+                "light"
+              ];
+              default = "standard";
+              description = "タスク実行で使う賢さ段階。";
+            };
+            trigger = lib.mkOption {
+              description = "タスクの起動トリガー。";
+              type = lib.types.submodule {
+                options = {
+                  type = lib.mkOption {
+                    type = lib.types.enum [ "cron" ];
+                    default = "cron";
+                    description = "トリガー種別。";
+                  };
+                  schedule = lib.mkOption {
+                    type = lib.types.str;
+                    description = "systemd timer の OnCalendar 式。";
+                  };
+                };
+              };
+            };
+            precheck = lib.mkOption {
+              default = null;
+              description = "エージェント起動前に実行する軽量チェック。失敗時はスキップする。";
+              type = lib.types.nullOr (
+                lib.types.submodule {
+                  options = {
+                    command = lib.mkOption {
+                      type = lib.types.str;
+                      description = "sh -c に渡す事前チェックコマンド。";
+                    };
+                    timeoutSec = lib.mkOption {
+                      type = lib.types.nullOr lib.types.ints.positive;
+                      default = null;
+                      description = "事前チェックのタイムアウト秒数。null 時は taskDefaults.precheckTimeoutSec を使う。";
+                    };
+                  };
+                }
+              );
+            };
+            memory = lib.mkOption {
+              default = null;
+              description = "タスクの長期記憶設定。null 時は記憶機能を使わない。";
+              type = lib.types.nullOr (
+                lib.types.submodule {
+                  options = {
+                    repo = lib.mkOption {
+                      type = lib.types.nullOr lib.types.str;
+                      default = null;
+                      description = "記憶を保存する git リポジトリパス。null 時は taskDefaults.memoryRepo を使う。";
+                    };
+                    file = lib.mkOption {
+                      type = lib.types.str;
+                      description = "記憶リポジトリ内の相対ファイルパス。";
+                    };
+                    maxLines = lib.mkOption {
+                      type = lib.types.ints.positive;
+                      default = 200;
+                      description = "プロンプトへ読み込む末尾行数。";
+                    };
+                  };
+                }
+              );
+            };
+            workdir = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "タスク実行時の作業ディレクトリ。null 時は taskDefaults.workdir を使う。";
+            };
+            timeoutSec = lib.mkOption {
+              type = lib.types.nullOr lib.types.ints.positive;
+              default = null;
+              description = "タスク全体のタイムアウト秒数。null 時は taskDefaults.timeoutSec を使う。";
+            };
+            envFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "EnvironmentFile パス。null 時は taskDefaults.envFile を使う。";
+            };
+          };
+        }
+      );
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = lib.concatLists (
+      lib.mapAttrsToList (name: task: [
+        {
+          assertion = lib.hasPrefix builtins.storeDir "${task.soul}";
+          message = "programs.autopilot5.tasks.${name}.soul は文字列パスではなく Nix パスリテラル（例: ./SOUL.md）またはストアパスで指定すること";
+        }
+        {
+          assertion = task.memory == null || task.memory.repo != null || cfg.taskDefaults.memoryRepo != null;
+          message = "programs.autopilot5.tasks.${name}.memory.repo または programs.autopilot5.taskDefaults.memoryRepo を指定すること";
+        }
+      ]) cfg.tasks
+    );
+
     # atelier サーバー上のエージェントが叩く gh が安全ラッパーを経由するように高優先度で配備
     environment.systemPackages = [ (lib.hiPrio cfg.package) ];
 
@@ -135,5 +329,54 @@ in
       "d ${home}/.local/bin 0755 ${cfg.user} ${group} -"
       "L+ ${home}/.local/bin/gh - - - - ${cfg.package}/bin/safe-gh"
     ];
+
+    systemd.user.services = lib.mapAttrs' (
+      name: task:
+      let
+        envFile = if task.envFile != null then task.envFile else cfg.taskDefaults.envFile;
+        resolvedTimeoutSec =
+          if task.timeoutSec != null then task.timeoutSec else cfg.taskDefaults.timeoutSec;
+        resolvedPrecheckTimeoutSec =
+          if task.precheck == null then
+            0
+          else if task.precheck.timeoutSec != null then
+            task.precheck.timeoutSec
+          else
+            cfg.taskDefaults.precheckTimeoutSec;
+      in
+      lib.nameValuePair "autopilot-task-${name}" {
+        description = "autopilot5 task: ${name}";
+        unitConfig.ConditionUser = cfg.user;
+        path = [
+          cfg.package
+          "${home}/.local"
+          "${home}/.config/orca/cli"
+          "/etc/profiles/per-user/${cfg.user}"
+          "/run/wrappers"
+          "/run/current-system/sw"
+        ];
+        serviceConfig = {
+          Type = "oneshot";
+          TimeoutStartSec = resolvedTimeoutSec + resolvedPrecheckTimeoutSec + 180;
+          ExecStart = "${cfg.package}/bin/autopilot-task run --config ${checkedTaskConfig name task}";
+        }
+        // lib.optionalAttrs (envFile != null) {
+          EnvironmentFile = "-${envFile}";
+        };
+      }
+    ) cfg.tasks;
+
+    systemd.user.timers = lib.mapAttrs' (
+      name: task:
+      lib.nameValuePair "autopilot-task-${name}" {
+        description = "autopilot5 task timer: ${name}";
+        unitConfig.ConditionUser = cfg.user;
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnCalendar = task.trigger.schedule;
+          Persistent = false;
+        };
+      }
+    ) cfg.tasks;
   };
 }
