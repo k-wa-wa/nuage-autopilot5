@@ -25,6 +25,9 @@ export type Level = (typeof LEVELS)[number];
 /** 実装と修正の賢さの既定。仕事の難しさは窓口が会話から分かるので、--level で変えられる。 */
 export const DEFAULT_LEVEL: Level = "high";
 
+/** 汎用タスクランナーの賢さの既定。 */
+export const DEFAULT_TASK_LEVEL: Level = "standard";
+
 /** 検討・仕様レビュー・レビュー・ゲート・要約の賢さ。見落としが一番高くつき、要約は差分とログをまとめるだけ。 */
 const FIXED_LEVELS = {
   spec: "high",
@@ -119,6 +122,17 @@ export function loadModelTable(path: string): ModelTable | null {
 export function resolveChain(spec: AgentSpec, level: Level, table: ModelTable): Invocation[] {
   const models = spec.models.length > 0 ? spec.models : (table[spec.agent]?.[level] ?? []);
   return (models.length > 0 ? models : [{}]).map((m) => ({ agent: spec.agent, ...m }));
+}
+
+/** 汎用タスク用の実行候補チェーンを構築する。agent が null なら roles.impl の順を使う。 */
+export function resolveTaskChain(
+  agent: AgentName | null,
+  level: Level,
+  table: ModelTable,
+): Invocation[] {
+  if (agent !== null) return resolveChain({ agent, models: [] }, level, table);
+  const agents = table.roles?.impl ?? DEFAULT_ROLES.impl;
+  return agents.flatMap((a) => resolveChain({ agent: a, models: [] }, level, table));
 }
 
 /** 名前付きの担当。name はログとレビューのファイル名に使う。 */

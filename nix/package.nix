@@ -45,6 +45,7 @@ stdenv.mkDerivation {
     export HOME=$TMPDIR
     bun test --isolate
     bun build --compile --outfile autopilot-run packages/autopilot-run/src/main.ts
+    bun build --compile --outfile autopilot-task packages/autopilot-task/src/main.ts
     bun build --compile --outfile safe-gh packages/safe-gh/src/main.ts
     bun build --compile --outfile pre-commit packages/safe-gh/src/hook.ts
     runHook postBuild
@@ -53,6 +54,7 @@ stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
     install -Dm755 autopilot-run $out/bin/autopilot-run
+    install -Dm755 autopilot-task $out/bin/autopilot-task
     install -Dm755 safe-gh $out/bin/safe-gh
 
     # Issue / PR への自由記述時の機密情報検査を行う safe-gh ラッパー
@@ -90,6 +92,12 @@ stdenv.mkDerivation {
 
     # PR・CI の操作に使う。安全ラッパー ($out/bin) を PATH の先頭に置き、子プロセスが必ずラッパーを経由するようにする。
     wrapProgram $out/bin/autopilot-run --prefix PATH : $out/bin:${
+      lib.makeBinPath [
+        git
+        gitleaks
+      ]
+    }
+    wrapProgram $out/bin/autopilot-task --prefix PATH : $out/bin:${
       lib.makeBinPath [
         git
         gitleaks

@@ -112,11 +112,42 @@ describe("run", () => {
     for (let i = 0; i < 40 && alive(grandchild); i++) await Bun.sleep(50);
     expect(alive(grandchild)).toBe(false);
   });
+
+  test("timeoutMs を超えたらプロセスグループごと停止し timedOut を返す", async () => {
+    dir = tempDir();
+    const pidFile = join(dir.path, "grandchild.pid");
+    const script = `
+      const c = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 600000)"]);
+      require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(c.pid));
+      setTimeout(() => {}, 600000);
+    `;
+    const r = await run([BUN, "-e", script], {
+      cwd: dir.path,
+      logPath: join(dir.path, "run.log"),
+      timeoutMs: 200,
+    });
+    expect(r.timedOut).toBe(true);
+    let grandchild = 0;
+    try {
+      grandchild = Number(readFileSync(pidFile, "utf8"));
+    } catch {}
+    if (grandchild > 0) {
+      for (let i = 0; i < 40 && alive(grandchild); i++) await Bun.sleep(50);
+      expect(alive(grandchild)).toBe(false);
+    }
+  });
 });
 
 describe("capture", () => {
   test("出力の前後の空白を落として返す", async () => {
     const r = await capture([BUN, "-e", "console.log('  x  '); console.error('e')"], process.cwd());
     expect(r).toEqual({ code: 0, stdout: "x", stderr: "e" });
+  });
+
+  test("timeoutMs を超えたら終了して timedOut を返す", async () => {
+    const r = await capture([BUN, "-e", "setTimeout(() => {}, 60000)"], process.cwd(), {
+      timeoutMs: 150,
+    });
+    expect(r.timedOut).toBe(true);
   });
 });
