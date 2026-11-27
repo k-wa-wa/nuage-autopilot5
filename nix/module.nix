@@ -118,6 +118,40 @@ let
       ${cfg.package}/bin/autopilot-task check-config --file ${raw}
       cp ${raw} $out
     '';
+
+  checkedSlackBotConfig =
+    name: bot:
+    let
+      raw = pkgs.writeText "autopilot-slack-bot-${name}.json" (
+        builtins.toJSON {
+          inherit name;
+          soulFile = "${bot.soul}";
+          inherit (bot) agent level;
+          apiBaseUrl = if bot.apiBaseUrl != null then bot.apiBaseUrl else cfg.slackBotDefaults.apiBaseUrl;
+          botTokenFile =
+            if bot.botTokenFile != null then bot.botTokenFile else cfg.slackBotDefaults.botTokenFile;
+          appTokenFile =
+            if bot.appTokenFile != null then bot.appTokenFile else cfg.slackBotDefaults.appTokenFile;
+          workdir = if bot.workdir != null then bot.workdir else cfg.slackBotDefaults.workdir;
+          timeoutSec = if bot.timeoutSec != null then bot.timeoutSec else cfg.slackBotDefaults.timeoutSec;
+          concurrency = if bot.concurrency != null then bot.concurrency else cfg.slackBotDefaults.concurrency;
+        }
+      );
+    in
+    pkgs.runCommand "autopilot-slack-bot-${name}-config.json" { } ''
+      export HOME=$TMPDIR
+      ${cfg.package}/bin/autopilot-slack-bot check-config --file ${raw}
+      cp ${raw} $out
+    '';
+
+  servicePath = [
+    cfg.package
+    "${home}/.local"
+    "${home}/.config/orca/cli"
+    "/etc/profiles/per-user/${cfg.user}"
+    "/run/wrappers"
+    "/run/current-system/sw"
+  ];
 in
 {
   options.programs.autopilot5 = {
@@ -296,21 +330,134 @@ in
         }
       );
     };
+
+    slackBotDefaults = {
+      apiBaseUrl = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Slack Bot 用 API ベース URL の既定値（環境変数 SLACK_API_BASE_URL が優先される）。";
+      };
+      botTokenFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Slack Bot 用トークンファイルの既定パス（環境変数 SLACK_BOT_TOKEN_FILE が優先される）。";
+      };
+      appTokenFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Slack App 用トークンファイルの既定パス（環境変数 SLACK_APP_TOKEN_FILE が優先される）。";
+      };
+      envFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Slack Bot 用 systemd サービスに読み込む既定の EnvironmentFile パス。";
+      };
+      workdir = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Slack Bot の既定の作業ディレクトリ。null 時はランナーが専用ディレクトリを自動作成する。";
+      };
+      timeoutSec = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 3600;
+        description = "Slack Bot の 1 ターンあたりの既定タイムアウト秒数。";
+      };
+      concurrency = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 3;
+        description = "異なるスレッドを同時に処理する既定の並列数。";
+      };
+    };
+
+    slackBots = lib.mkOption {
+      default = { };
+      description = "Slack App 互換 Socket Mode で常駐稼働する調査・対応 Bot の定義。";
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = {
+            soul = lib.mkOption {
+              type = lib.types.path;
+              description = "Bot の指示書（SOUL.md）のパス。Nix パスリテラル（例: ./SOUL.md）またはストアパスで指定する。";
+            };
+            agent = lib.mkOption {
+              type = lib.types.nullOr (
+                lib.types.enum [
+                  "claude"
+                  "agy"
+                  "codex"
+                ]
+              );
+              default = null;
+              description = "使用するエージェント CLI。null 時は models.yaml の roles.impl 順で実行する。";
+            };
+            level = lib.mkOption {
+              type = lib.types.enum [
+                "high"
+                "standard"
+                "light"
+              ];
+              default = "standard";
+              description = "エージェント実行で使う賢さ段階。";
+            };
+            apiBaseUrl = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Slack 互換 Web API ベース URL。null 時は slackBotDefaults.apiBaseUrl を使う（実行時は SLACK_API_BASE_URL が優先）。";
+            };
+            botTokenFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Slack Bot トークンファイルパス。null 時は slackBotDefaults.botTokenFile を使う（実行時は SLACK_BOT_TOKEN_FILE が優先）。";
+            };
+            appTokenFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Slack App トークンファイルパス。null 時は slackBotDefaults.appTokenFile を使う（実行時は SLACK_APP_TOKEN_FILE が優先）。";
+            };
+            workdir = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "エージェント実行時の作業ディレクトリ。null 時は slackBotDefaults.workdir を使う。";
+            };
+            timeoutSec = lib.mkOption {
+              type = lib.types.nullOr lib.types.ints.positive;
+              default = null;
+              description = "1 ターンあたりのタイムアウト秒数。null 時は slackBotDefaults.timeoutSec を使う。";
+            };
+            concurrency = lib.mkOption {
+              type = lib.types.nullOr lib.types.ints.positive;
+              default = null;
+              description = "並行処理するスレッド数の上限。null 時は slackBotDefaults.concurrency を使う。";
+            };
+            envFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "EnvironmentFile パス。null 時は slackBotDefaults.envFile を使う。";
+            };
+          };
+        }
+      );
+    };
   };
 
   config = lib.mkIf cfg.enable {
-    assertions = lib.concatLists (
-      lib.mapAttrsToList (name: task: [
-        {
-          assertion = lib.hasPrefix builtins.storeDir "${task.soul}";
-          message = "programs.autopilot5.tasks.${name}.soul は文字列パスではなく Nix パスリテラル（例: ./SOUL.md）またはストアパスで指定すること";
-        }
-        {
-          assertion = task.memory == null || task.memory.repo != null || cfg.taskDefaults.memoryRepo != null;
-          message = "programs.autopilot5.tasks.${name}.memory.repo または programs.autopilot5.taskDefaults.memoryRepo を指定すること";
-        }
-      ]) cfg.tasks
-    );
+    assertions =
+      lib.concatLists (
+        lib.mapAttrsToList (name: task: [
+          {
+            assertion = lib.hasPrefix builtins.storeDir "${task.soul}";
+            message = "programs.autopilot5.tasks.${name}.soul は文字列パスではなく Nix パスリテラル（例: ./SOUL.md）またはストアパスで指定すること";
+          }
+          {
+            assertion = task.memory == null || task.memory.repo != null || cfg.taskDefaults.memoryRepo != null;
+            message = "programs.autopilot5.tasks.${name}.memory.repo または programs.autopilot5.taskDefaults.memoryRepo を指定すること";
+          }
+        ]) cfg.tasks
+      )
+      ++ lib.mapAttrsToList (name: bot: {
+        assertion = lib.hasPrefix builtins.storeDir "${bot.soul}";
+        message = "programs.autopilot5.slackBots.${name}.soul は文字列パスではなく Nix パスリテラル（例: ./SOUL.md）またはストアパスで指定すること";
+      }) cfg.slackBots;
 
     # atelier サーバー上のエージェントが叩く gh が安全ラッパーを経由するように高優先度で配備
     environment.systemPackages = [ (lib.hiPrio cfg.package) ];
@@ -330,41 +477,56 @@ in
       "L+ ${home}/.local/bin/gh - - - - ${cfg.package}/bin/safe-gh"
     ];
 
-    systemd.user.services = lib.mapAttrs' (
-      name: task:
-      let
-        envFile = if task.envFile != null then task.envFile else cfg.taskDefaults.envFile;
-        resolvedTimeoutSec =
-          if task.timeoutSec != null then task.timeoutSec else cfg.taskDefaults.timeoutSec;
-        resolvedPrecheckTimeoutSec =
-          if task.precheck == null then
-            0
-          else if task.precheck.timeoutSec != null then
-            task.precheck.timeoutSec
-          else
-            cfg.taskDefaults.precheckTimeoutSec;
-      in
-      lib.nameValuePair "autopilot-task-${name}" {
-        description = "autopilot5 task: ${name}";
-        unitConfig.ConditionUser = cfg.user;
-        path = [
-          cfg.package
-          "${home}/.local"
-          "${home}/.config/orca/cli"
-          "/etc/profiles/per-user/${cfg.user}"
-          "/run/wrappers"
-          "/run/current-system/sw"
-        ];
-        serviceConfig = {
-          Type = "oneshot";
-          TimeoutStartSec = resolvedTimeoutSec + resolvedPrecheckTimeoutSec + 180;
-          ExecStart = "${cfg.package}/bin/autopilot-task run --config ${checkedTaskConfig name task}";
+    systemd.user.services =
+      lib.mapAttrs' (
+        name: task:
+        let
+          envFile = if task.envFile != null then task.envFile else cfg.taskDefaults.envFile;
+          resolvedTimeoutSec =
+            if task.timeoutSec != null then task.timeoutSec else cfg.taskDefaults.timeoutSec;
+          resolvedPrecheckTimeoutSec =
+            if task.precheck == null then
+              0
+            else if task.precheck.timeoutSec != null then
+              task.precheck.timeoutSec
+            else
+              cfg.taskDefaults.precheckTimeoutSec;
+        in
+        lib.nameValuePair "autopilot-task-${name}" {
+          description = "autopilot5 task: ${name}";
+          unitConfig.ConditionUser = cfg.user;
+          path = servicePath;
+          serviceConfig = {
+            Type = "oneshot";
+            TimeoutStartSec = resolvedTimeoutSec + resolvedPrecheckTimeoutSec + 180;
+            ExecStart = "${cfg.package}/bin/autopilot-task run --config ${checkedTaskConfig name task}";
+          }
+          // lib.optionalAttrs (envFile != null) {
+            EnvironmentFile = "-${envFile}";
+          };
         }
-        // lib.optionalAttrs (envFile != null) {
-          EnvironmentFile = "-${envFile}";
-        };
-      }
-    ) cfg.tasks;
+      ) cfg.tasks
+      // lib.mapAttrs' (
+        name: bot:
+        let
+          envFile = if bot.envFile != null then bot.envFile else cfg.slackBotDefaults.envFile;
+        in
+        lib.nameValuePair "autopilot-slack-bot-${name}" {
+          description = "autopilot5 slack bot: ${name}";
+          unitConfig.ConditionUser = cfg.user;
+          wantedBy = [ "default.target" ];
+          path = servicePath;
+          serviceConfig = {
+            Type = "simple";
+            Restart = "always";
+            RestartSec = 5;
+            ExecStart = "${cfg.package}/bin/autopilot-slack-bot run --config ${checkedSlackBotConfig name bot}";
+          }
+          // lib.optionalAttrs (envFile != null) {
+            EnvironmentFile = "-${envFile}";
+          };
+        }
+      ) cfg.slackBots;
 
     systemd.user.timers = lib.mapAttrs' (
       name: task:

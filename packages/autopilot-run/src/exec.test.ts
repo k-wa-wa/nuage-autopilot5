@@ -77,6 +77,40 @@ describe("run", () => {
     expect(readFileSync(out, "utf8").trim()).toBe("");
   });
 
+  test("env 指定で機密環境変数を除外し、ORCA_* の除外は維持する", async () => {
+    dir = tempDir();
+    const out = join(dir.path, "env-override.txt");
+    process.env.SLACK_BOT_TOKEN = "secret-bot";
+    process.env.ORCA_PANE_KEY = "pane";
+    try {
+      await run(
+        [
+          BUN,
+          "-e",
+          "console.log(JSON.stringify({ bot: process.env.SLACK_BOT_TOKEN ?? null, orca: process.env.ORCA_PANE_KEY ?? null, custom: process.env.CUSTOM_FLAG ?? null }))",
+        ],
+        {
+          cwd: dir.path,
+          stdoutPath: out,
+          logPath: join(dir.path, "run.log"),
+          env: {
+            SLACK_BOT_TOKEN: undefined,
+            ORCA_PANE_KEY: "should-stay-excluded",
+            CUSTOM_FLAG: "yes",
+          },
+        },
+      );
+    } finally {
+      delete process.env.SLACK_BOT_TOKEN;
+      delete process.env.ORCA_PANE_KEY;
+    }
+    expect(JSON.parse(readFileSync(out, "utf8").trim())).toEqual({
+      bot: null,
+      orca: null,
+      custom: "yes",
+    });
+  });
+
   test("利用上限を出力していても、シグナル終了は通常のエラーとして識別できる", async () => {
     dir = tempDir();
     const r = await run(
