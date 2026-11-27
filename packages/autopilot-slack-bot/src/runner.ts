@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   statSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -22,7 +23,7 @@ import { resolveSlackRuntimeEnv, type SlackBotConfig } from "./config.ts";
 import { buildSlackPrompt, type SlackThreadMessage, splitSlackMessage } from "./prompt.ts";
 import { ThreadQueue } from "./queue.ts";
 import { type BotIdentity, EventRouter, type RouteDecision, type SlackEvent } from "./router.ts";
-import { SlackWebClient, SocketModeClient } from "./slack.ts";
+import { SlackApiError, SlackWebClient, SocketModeClient } from "./slack.ts";
 import { type ThreadSessionState, ThreadSessionStore, threadKey } from "./state.ts";
 
 function appendLog(logPath: string, prefix: string, msg: string): void {
@@ -43,34 +44,102 @@ function hashDirEntries(dir: string, relBase: string, hash: ReturnType<typeof cr
       hash.update(`D:${rel}\0`);
       hashDirEntries(full, rel, hash);
     } else if (st.isFile()) {
-      hash.update(`F:${rel}:${st.size}:${st.mtimeMs}\0`);
+      hash.update(`F:${rel}:${st.size}\0`);
+      hash.update(readFileSync(full));
+      hash.update("\0");
+    } else if (st.isSymbolicLink()) {
+      hash.update(`L:${rel}:${readlinkSync(full)}\0`);
     } else {
       hash.update(`O:${rel}:${st.mode}\0`);
     }
   }
 }
 
-async function snapshotWorkdir(workdir: string): Promise<string> {
-  const inside = await capture(
-    ["git", "-C", workdir, "rev-parse", "--is-inside-work-tree"],
-    workdir,
-  );
-  const hash = createHash("sha256");
-  if (inside.code === 0 && inside.stdout === "true") {
-    const parts = await Promise.all([
-      capture(["git", "-C", workdir, "rev-parse", "HEAD"], workdir),
-      capture(
-        ["git", "-C", workdir, "status", "--porcelain=v1", "--untracked-files=all"],
-        workdir,
-        { trim: false },
-      ),
-      capture(["git", "-C", workdir, "diff", "HEAD"], workdir, { trim: false }),
-    ]);
-    for (const p of parts) hash.update(`${p.stdout}\0`);
-  } else {
-    hashDirEntries(workdir, "", hash);
+function hashWorkdirPath(full: string, rel: string, hash: ReturnType<typeof createHash>): void {
+  if (!existsSync(full)) {
+    hash.update(`M:${rel}\0`);
+    return;
   }
-  return hash.digest("hex");
+  const st = lstatSync(full);
+  if (st.isDirectory()) {
+    hash.update(`D:${rel}\0`);
+    hashDirEntries(full, rel, hash);
+  } else if (st.isFile()) {
+    hash.update(`F:${rel}:${st.size}\0`);
+    hash.update(readFileSync(full));
+    hash.update("\0");
+  } else if (st.isSymbolicLink()) {
+    hash.update(`L:${rel}:${readlinkSync(full)}\0`);
+  } else {
+    hash.update(`O:${rel}:${st.mode}\0`);
+  }
+}
+
+async function snapshotWorkdir(workdir: string): Promise<string | null> {
+  const cleanEnv = buildAgentEnvOverrides();
+  try {
+    const inside = await capture(
+      ["git", "-C", workdir, "rev-parse", "--is-inside-work-tree"],
+      workdir,
+      { env: cleanEnv },
+    );
+    const hash = createHash("sha256");
+    if (inside.code === 0 && inside.stdout === "true") {
+      const [statusRes, headRes, untrackedRes] = await Promise.all([
+        capture(
+          ["git", "-C", workdir, "status", "--porcelain=v1", "--untracked-files=all", "-z"],
+          workdir,
+          { trim: false, env: cleanEnv },
+        ),
+        capture(["git", "-C", workdir, "rev-parse", "--verify", "HEAD"], workdir, {
+          env: cleanEnv,
+        }),
+        capture(
+          ["git", "-C", workdir, "ls-files", "--others", "--exclude-standard", "-z"],
+          workdir,
+          {
+            trim: false,
+            env: cleanEnv,
+          },
+        ),
+      ]);
+      if (statusRes.code !== 0 || untrackedRes.code !== 0) {
+        return null;
+      }
+      hash.update(`S:${statusRes.stdout}\0`);
+
+      if (headRes.code === 0) {
+        hash.update(`H:${headRes.stdout}\0`);
+        const diffRes = await capture(["git", "-C", workdir, "diff", "HEAD"], workdir, {
+          trim: false,
+          env: cleanEnv,
+        });
+        if (diffRes.code !== 0) return null;
+        hash.update(`D:${diffRes.stdout}\0`);
+      } else {
+        const diffCached = await capture(["git", "-C", workdir, "diff", "--cached"], workdir, {
+          trim: false,
+          env: cleanEnv,
+        });
+        if (diffCached.code !== 0) return null;
+        hash.update(`C:${diffCached.stdout}\0`);
+      }
+
+      const untracked = untrackedRes.stdout.split("\0").filter(Boolean).sort();
+      for (const rel of untracked) {
+        hashWorkdirPath(join(workdir, rel), rel, hash);
+      }
+      return hash.digest("hex");
+    }
+
+    if (inside.code === 128 && inside.stderr.includes("not a git repository")) {
+      hashDirEntries(workdir, "", hash);
+      return hash.digest("hex");
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 function sanitizeFileSegment(s: string): string {
@@ -112,6 +181,7 @@ export interface RunSlackBotOptions {
   helloTimeoutMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
+  minStableConnectionMs?: number;
   authRetryInitialMs?: number;
   authRetryMaxMs?: number;
 }
@@ -179,22 +249,35 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
   const signals = ["SIGTERM", "SIGINT", "SIGHUP"] as const;
   for (const sig of signals) process.on(sig, onSignal);
 
-  const postReply = async (channel: string, threadTs: string, text: string): Promise<boolean> => {
+  const postReply = async (
+    channel: string,
+    threadTs: string,
+    text: string,
+  ): Promise<{ allSent: boolean; anySent: boolean }> => {
     const chunks = splitSlackMessage(text);
     const toSend = chunks.length > 0 ? chunks : ["(エージェントからの応答本文が空だった)"];
+    let sentCount = 0;
     try {
       for (const chunk of toSend) {
         await slackClient.postMessage({ channel, thread_ts: threadTs, text: chunk });
+        sentCount++;
       }
-      return true;
+      return { allSent: true, anySent: sentCount > 0 };
     } catch (e) {
       error(
-        `chat.postMessage 失敗 (channel=${channel}, thread_ts=${threadTs}): ${
+        `chat.postMessage 失敗 (channel=${channel}, thread_ts=${threadTs}, sent=${sentCount}/${toSend.length}): ${
           e instanceof Error ? e.message : String(e)
         }`,
       );
-      return false;
+      return { allSent: false, anySent: sentCount > 0 };
     }
+  };
+
+  const mergeProcessedTs = (prev: ThreadSessionState | null, messageTs: string): string[] => {
+    const existing = prev?.processedTs ?? (prev?.lastProcessedTs ? [prev.lastProcessedTs] : []);
+    const filtered = existing.filter((ts) => ts !== messageTs);
+    filtered.push(messageTs);
+    return filtered.slice(-100);
   };
 
   const saveSessionSafely = (state: ThreadSessionState): void => {
@@ -224,9 +307,18 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
       const messages = await slackClient.getThreadReplies(channel, threadTs);
       return { ok: true, messages, error: null };
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      warn(`conversations.replies 失敗 (channel=${channel}, ts=${threadTs}): ${msg}`);
-      return { ok: false, messages: null, error: msg };
+      const fullMsg = e instanceof Error ? e.message : String(e);
+      warn(`conversations.replies 失敗 (channel=${channel}, ts=${threadTs}): ${fullMsg}`);
+      let promptError: string;
+      if (e instanceof SlackApiError) {
+        promptError =
+          e.code === "token_read_error"
+            ? "認証情報を読み込めず履歴取得に失敗した"
+            : `${e.code}${e.status ? ` (HTTP ${e.status})` : ""}`;
+      } else {
+        promptError = "スレッド履歴の取得中に通信・API エラーが発生した";
+      }
+      return { ok: false, messages: null, error: promptError };
     }
   };
 
@@ -237,6 +329,13 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
     turnId: string,
   ): Promise<AgentExecutionResult> => {
     for (const inv of chain) {
+      if (shutdownController.signal.aborted) {
+        return {
+          ok: false,
+          timedOut: false,
+          reason: "停止要求により中断した",
+        };
+      }
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
         return {
@@ -247,6 +346,13 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
       }
 
       const beforeWorkdir = await snapshotWorkdir(workdir);
+      if (shutdownController.signal.aborted) {
+        return {
+          ok: false,
+          timedOut: false,
+          reason: "停止要求により中断した",
+        };
+      }
       const sessionReq: SessionRequest = { kind: "start", id: randomUUID() };
       const stdoutPath = join(agentStdoutDir, `${turnId}-${inv.agent}.log`);
 
@@ -256,7 +362,7 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
         cwd: workdir,
         logPath,
         stdoutPath,
-        timeoutMs: remainingMs,
+        timeoutMs: Math.max(1, deadline - Date.now()),
         env: buildAgentEnvOverrides(),
       });
 
@@ -292,8 +398,11 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
 
       if (out.failure === "unavailable") {
         const afterWorkdir = await snapshotWorkdir(workdir);
-        if (afterWorkdir !== beforeWorkdir) {
-          const reason = `${formatInvocation(inv)}: 作業ディレクトリを変更した後に利用不能 (exit ${r.code}) となったため別候補へ切り替えない`;
+        if (beforeWorkdir === null || afterWorkdir === null || afterWorkdir !== beforeWorkdir) {
+          const reason =
+            beforeWorkdir === null || afterWorkdir === null
+              ? `${formatInvocation(inv)}: 作業ディレクトリの変更有無を検証できないため別候補へ切り替えない`
+              : `${formatInvocation(inv)}: 作業ディレクトリを変更した後に利用不能 (exit ${r.code}) となったため別候補へ切り替えない`;
           error(reason);
           return { ok: false, timedOut: false, reason };
         }
@@ -314,10 +423,12 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
   };
 
   const handleDecision = async (decision: RouteDecision, identity: BotIdentity): Promise<void> => {
+    if (shutdownController.signal.aborted) return;
     const key = threadKey(decision.channel, decision.threadTs);
     const turnId = `${sanitizeFileSegment(decision.channel)}-${sanitizeFileSegment(decision.messageTs)}-${randomUUID().slice(0, 8)}`;
+    // 保存失敗時にメモリへ退避した最新セッションをディスク上の古い状態より優先する。
     const saved =
-      sessionStore.get(decision.channel, decision.threadTs) ?? fallbackSessions.get(key) ?? null;
+      fallbackSessions.get(key) ?? sessionStore.get(decision.channel, decision.threadTs) ?? null;
     let replyPosted = false;
 
     try {
@@ -351,6 +462,7 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
         });
 
         const beforeWorkdir = await snapshotWorkdir(workdir);
+        if (shutdownController.signal.aborted) return;
         const stdoutPath = join(agentStdoutDir, `${turnId}-${resumeInv.agent}-resume.log`);
         log(`-> ${formatInvocation(resumeInv)} (会話 ${saved.sessionId} の続き)`);
         const adapter = getAgentAdapter(resumeInv.agent);
@@ -388,8 +500,15 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
               const reason = `${formatInvocation(resumeInv)}: resume が異常終了 (exit ${r.code}) したため新規セッションへ切り替えない`;
               error(reason);
               result = { ok: false, timedOut: false, reason };
-            } else if (afterWorkdir !== beforeWorkdir) {
-              const reason = `${formatInvocation(resumeInv)}: resume 中に作業ディレクトリを変更した後に利用不能 (exit ${r.code}) となったため新規セッションへ切り替えない`;
+            } else if (
+              beforeWorkdir === null ||
+              afterWorkdir === null ||
+              afterWorkdir !== beforeWorkdir
+            ) {
+              const reason =
+                beforeWorkdir === null || afterWorkdir === null
+                  ? `${formatInvocation(resumeInv)}: resume 中の作業ディレクトリ変更有無を検証できないため新規セッションへ切り替えない`
+                  : `${formatInvocation(resumeInv)}: resume 中に作業ディレクトリを変更した後に利用不能 (exit ${r.code}) となったため新規セッションへ切り替えない`;
               error(reason);
               result = { ok: false, timedOut: false, reason };
             } else {
@@ -397,6 +516,7 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
                 `${formatInvocation(resumeInv)}: resume が利用不能 (exit ${r.code}) のためスレッド履歴を読み直して新規セッションで引き継ぐ`,
               );
               const history = await fetchThreadMessagesSafe(decision.channel, decision.threadTs);
+              if (shutdownController.signal.aborted) return;
               const fallbackPrompt = buildSlackPrompt({
                 config,
                 botDisplayName,
@@ -414,6 +534,7 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
         }
       } else {
         const history = await fetchThreadMessagesSafe(decision.channel, decision.threadTs);
+        if (shutdownController.signal.aborted) return;
         const startPrompt = buildSlackPrompt({
           config,
           botDisplayName,
@@ -432,40 +553,47 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
 
       const nowIso = new Date().toISOString();
       if (result.ok) {
-        const replied = await postReply(decision.channel, decision.threadTs, result.text);
-        if (replied) replyPosted = true;
+        const postRes = await postReply(decision.channel, decision.threadTs, result.text);
+        if (postRes.anySent) replyPosted = true;
+        if (postRes.anySent && !postRes.allSent) {
+          warn(`一部の返信チャンクのみ投稿されたため参加済みとして記録する: key=${key}`);
+        }
         saveSessionSafely({
           botName: config.name,
           channel: decision.channel,
           threadTs: decision.threadTs,
-          participated: replied || Boolean(saved?.participated),
+          participated: postRes.anySent || Boolean(saved?.participated),
           agent: result.inv.agent,
           ...(result.inv.model ? { model: result.inv.model } : {}),
           ...(result.inv.effort ? { effort: result.inv.effort } : {}),
           sessionId: result.sessionId,
           lastProcessedTs: decision.messageTs,
+          processedTs: mergeProcessedTs(saved, decision.messageTs),
           createdAt: saved?.createdAt ?? nowIso,
           updatedAt: nowIso,
         });
         log(`スレッド処理完了: key=${key}`);
       } else {
         error(`スレッド処理失敗: key=${key} reason=${result.reason}`);
-        const replied = await postReply(
+        const postRes = await postReply(
           decision.channel,
           decision.threadTs,
           `[エラー] 調査・処理に失敗した: ${result.reason}`,
         );
-        if (replied) replyPosted = true;
-        if (replied && !saved) {
+        if (postRes.anySent) replyPosted = true;
+        if (postRes.anySent || saved) {
           saveSessionSafely({
             botName: config.name,
             channel: decision.channel,
             threadTs: decision.threadTs,
-            participated: true,
-            agent: null,
-            sessionId: null,
+            participated: postRes.anySent || Boolean(saved?.participated),
+            agent: saved?.agent ?? null,
+            ...(saved?.model ? { model: saved.model } : {}),
+            ...(saved?.effort ? { effort: saved.effort } : {}),
+            sessionId: saved?.sessionId ?? null,
             lastProcessedTs: decision.messageTs,
-            createdAt: nowIso,
+            processedTs: mergeProcessedTs(saved, decision.messageTs),
+            createdAt: saved?.createdAt ?? nowIso,
             updatedAt: nowIso,
           });
         }
@@ -475,22 +603,25 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
       const reason = e instanceof Error ? e.message : String(e);
       error(`スレッド処理中に予期しないエラー: key=${key} reason=${reason}`);
       if (!replyPosted) {
-        const replied = await postReply(
+        const postRes = await postReply(
           decision.channel,
           decision.threadTs,
           `[エラー] 調査・処理中にエラーが発生した: ${reason}`,
         );
-        if (replied && !saved) {
+        if (postRes.anySent || saved) {
           const nowIso = new Date().toISOString();
           saveSessionSafely({
             botName: config.name,
             channel: decision.channel,
             threadTs: decision.threadTs,
-            participated: true,
-            agent: null,
-            sessionId: null,
+            participated: postRes.anySent || Boolean(saved?.participated),
+            agent: saved?.agent ?? null,
+            ...(saved?.model ? { model: saved.model } : {}),
+            ...(saved?.effort ? { effort: saved.effort } : {}),
+            sessionId: saved?.sessionId ?? null,
             lastProcessedTs: decision.messageTs,
-            createdAt: nowIso,
+            processedTs: mergeProcessedTs(saved, decision.messageTs),
+            createdAt: saved?.createdAt ?? nowIso,
             updatedAt: nowIso,
           });
         }
@@ -520,9 +651,17 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
         isParticipatingThread: (ch, ts) => {
           const k = threadKey(ch, ts);
           return (
-            sessionStore.hasParticipated(ch, ts) ||
             Boolean(fallbackSessions.get(k)?.participated) ||
+            sessionStore.hasParticipated(ch, ts) ||
             queue.hasPendingOrActive(k)
+          );
+        },
+        hasProcessedMessage: (ch, ts, messageTs) => {
+          const k = threadKey(ch, ts);
+          const state = fallbackSessions.get(k) ?? sessionStore.get(ch, ts);
+          if (!state) return false;
+          return (
+            state.lastProcessedTs === messageTs || Boolean(state.processedTs?.includes(messageTs))
           );
         },
       });
@@ -553,6 +692,7 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
       helloTimeoutMs: opts.helloTimeoutMs,
       initialBackoffMs: opts.initialBackoffMs,
       maxBackoffMs: opts.maxBackoffMs,
+      minStableConnectionMs: opts.minStableConnectionMs,
     });
 
     await socketClient.start();

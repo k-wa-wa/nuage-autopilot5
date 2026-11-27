@@ -215,6 +215,64 @@ describe("SlackWebClient", () => {
       },
     ]);
   });
+
+  test("HTTPS ベース URL では ws:// を拒否し、chat.postMessage は通信エラー時に再送しない", async () => {
+    let postAttempts = 0;
+    const client = new SlackWebClient({
+      apiBaseUrl: "https://monitoring.wpcapp.net/slack/api",
+      botToken: "bot",
+      appToken: "app",
+      fetchFn: (async (input: string | URL | Request) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.endsWith("/apps.connections.open")) {
+          return Response.json({ ok: true, url: "ws://monitoring.wpcapp.net/slack/socket" });
+        }
+        if (url.endsWith("/chat.postMessage")) {
+          postAttempts++;
+          throw new Error("socket closed after server persisted");
+        }
+        return new Response("not found", { status: 404 });
+      }) as typeof fetch,
+    });
+
+    await expect(client.openSocketConnection()).rejects.toMatchObject({
+      code: "insecure_ws_url",
+      retryable: false,
+    });
+
+    await expect(
+      client.postMessage({ channel: "C1", thread_ts: "10.1", text: "重複防止テスト" }),
+    ).rejects.toMatchObject({
+      code: "network_error",
+    });
+    expect(postAttempts).toBe(1);
+  });
+
+  test("getThreadReplies は reply_count を保持する", async () => {
+    const srv = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({
+          ok: true,
+          has_more: false,
+          messages: [
+            { ts: "100.1", text: "parent", reply_count: 250 },
+            { ts: "100.2", thread_ts: "100.1", text: "r1" },
+          ],
+        });
+      },
+    });
+    servers.push(srv);
+
+    const client = new SlackWebClient({
+      apiBaseUrl: `http://127.0.0.1:${srv.port}/slack/api`,
+      botToken: "bot",
+      appToken: "app",
+    });
+    const replies = await client.getThreadReplies("C1", "100.1");
+    expect(replies[0]?.reply_count).toBe(250);
+  });
 });
 
 describe("SocketModeClient", () => {
@@ -316,5 +374,65 @@ describe("SocketModeClient", () => {
     expect(acked).toEqual(["env-1", "env-3"]);
     expect(receivedEvents).toEqual(["10.1", "10.3"]);
     expect(warnings.some((w) => w.includes("無通信タイムアウト"))).toBe(true);
+  });
+
+  test("hello 直後の disconnect 繰り返しには指数バックオフが効く", async () => {
+    let connCount = 0;
+    const openTimes: number[] = [];
+    let port = 0;
+    let sm: SocketModeClient | null = null;
+    const srv = Bun.serve<{ conn: number }>({
+      port: 0,
+      fetch(req, server) {
+        const url = new URL(req.url);
+        if (url.pathname === "/slack/api/apps.connections.open") {
+          openTimes.push(Date.now());
+          if (openTimes.length >= 4) {
+            sm?.stop();
+          }
+          return Response.json({
+            ok: true,
+            url: `ws://127.0.0.1:${port}/slack/socket`,
+          });
+        }
+        if (url.pathname === "/slack/socket") {
+          if (server.upgrade(req, { data: { conn: ++connCount } })) return undefined;
+        }
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        open(ws) {
+          ws.send(JSON.stringify({ type: "hello", num_connections: ws.data.conn }));
+          ws.send(JSON.stringify({ type: "disconnect", reason: "refresh_requested" }));
+        },
+        message() {},
+      },
+    });
+    port = srv.port ?? 0;
+    servers.push(srv);
+
+    const client = new SlackWebClient({
+      apiBaseUrl: `http://127.0.0.1:${srv.port}/slack/api`,
+      botToken: "bot",
+      appToken: "app",
+    });
+
+    sm = new SocketModeClient({
+      client,
+      onEvent: () => {},
+      pingIntervalMs: 0,
+      inactivityTimeoutMs: 5000,
+      helloTimeoutMs: 5000,
+      initialBackoffMs: 30,
+      maxBackoffMs: 200,
+      minStableConnectionMs: 10_000,
+    });
+
+    await sm.start();
+    expect(openTimes.length).toBeGreaterThanOrEqual(4);
+    const gap1 = openTimes[1]! - openTimes[0]!;
+    const gap3 = openTimes[3]! - openTimes[2]!;
+    // 30ms -> 60ms -> 120ms と待ち時間が伸びていることを確かめる
+    expect(gap3).toBeGreaterThan(gap1 * 2);
   });
 });

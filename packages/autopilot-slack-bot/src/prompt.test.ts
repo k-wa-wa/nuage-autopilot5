@@ -192,6 +192,103 @@ describe("buildSlackPrompt", () => {
     expect(prompt).toContain("````");
     expect(prompt).not.toContain("(スレッド履歴なし)");
   });
+
+  test("親アラートの大きな details を個別に切り詰め、親の要約・URL・後続返信を残す", () => {
+    const history = formatThreadHistory([
+      {
+        ts: "100.1",
+        bot_id: "B_AM",
+        username: "alertmanager",
+        text: "[firing] HighErrorRate (prod-api)",
+        source_kind: "alert",
+        alert_status: "firing",
+        level: "critical",
+        url: "https://prometheus.wpcapp.net/graph?g0.expr=http_errors",
+        details: JSON.stringify({
+          labels: { alertname: "HighErrorRate" },
+          hugeLog: "あ".repeat(20_000),
+        }),
+      },
+      {
+        ts: "100.2",
+        user: "U1",
+        thread_ts: "100.1",
+        text: "調査して",
+      },
+    ]);
+
+    expect(Buffer.byteLength(history, "utf8")).toBeLessThanOrEqual(48 * 1024);
+    expect(history).toContain("[firing] HighErrorRate (prod-api)");
+    expect(history).toContain("https://prometheus.wpcapp.net/graph?g0.expr=http_errors");
+    expect(history).toContain("alert_status=firing");
+    expect(history).toContain("調査して");
+  });
+
+  test("連続バッククォートや巨大 SOUL でも最終プロンプトが maxPromptBytes を超えない", () => {
+    const backticks = "`".repeat(45_000);
+    const prompt = buildSlackPrompt({
+      config: baseConfig,
+      botDisplayName: "autopilot-bot",
+      soulText: `# SOUL\n${"x".repeat(40_000)}`,
+      nowIso: "2026-11-27T00:00:00.000Z",
+      workdir: "/tmp/work",
+      decision: {
+        kind: "app_mention",
+        channel: "C01",
+        threadTs: "100.1",
+        messageTs: "100.2",
+        event: {
+          type: "app_mention",
+          channel: "C01",
+          thread_ts: "100.1",
+          ts: "100.2",
+          user: "U1",
+          text: backticks,
+        },
+      },
+      sessionMode: "start",
+      threadMessages: [{ ts: "100.1", user: "U1", text: backticks }],
+    });
+
+    expect(Buffer.byteLength(prompt, "utf8")).toBeLessThanOrEqual(96 * 1024);
+  });
+
+  test("reply_count が取得件数を上回るときは最近の返信欠落の可能性を明記する", () => {
+    const history = formatThreadHistory([
+      { ts: "100.1", bot_id: "B_AM", text: "parent alert", reply_count: 250 },
+      { ts: "100.2", user: "U1", text: "reply 1" },
+    ]);
+    expect(history).toContain("全 250 件中 1 件のみ取得");
+    expect(history).toContain("欠落している可能性");
+  });
+
+  test("人間の依頼本文と履歴・アラート参考データの役割を区別して提示する", () => {
+    const prompt = buildSlackPrompt({
+      config: baseConfig,
+      botDisplayName: "autopilot-bot",
+      soulText: "# SOUL",
+      nowIso: "2026-11-27T00:00:00.000Z",
+      workdir: "/tmp/work",
+      decision: {
+        kind: "app_mention",
+        channel: "C01",
+        threadTs: "100.1",
+        messageTs: "100.2",
+        event: {
+          type: "app_mention",
+          channel: "C01",
+          thread_ts: "100.1",
+          ts: "100.2",
+          user: "U1",
+          text: "直して",
+        },
+      },
+      sessionMode: "start",
+      threadMessages: [{ ts: "100.1", bot_id: "B_AM", text: "[firing] Alert" }],
+    });
+    expect(prompt).toContain("人間からの調査・対応依頼である");
+    expect(prompt).toContain("判断材料としてのみ参照し");
+  });
 });
 
 describe("splitSlackMessage", () => {
@@ -207,5 +304,14 @@ describe("splitSlackMessage", () => {
       expect(c.length).toBeLessThanOrEqual(70);
     }
     expect(chunks.join("\n")).toBe(text);
+  });
+
+  test("サロゲートペア境界を跨いで絵文字を分断しない", () => {
+    const text = `${"a".repeat(3799)}🚨${"b".repeat(10)}`;
+    const chunks = splitSlackMessage(text, 3800);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toBe("a".repeat(3799));
+    expect(chunks[1]).toBe(`🚨${"b".repeat(10)}`);
+    expect(chunks.join("")).toBe(text);
   });
 });

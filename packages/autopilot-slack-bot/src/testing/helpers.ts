@@ -133,6 +133,9 @@ export function createMockSlackServer(opts: {
   authFailCount?: number;
   failConnectionsOpenOnCall?: number;
   failRepliesError?: string;
+  repliesDelayMs?: number;
+  failPostOnCall?: number;
+  onRepliesCalled?: () => void;
   threads?: Record<string, Array<Record<string, unknown>>>;
 }) {
   const botUserId = opts.botUserId ?? "U_CUSTOM_BOT";
@@ -187,6 +190,10 @@ export function createMockSlackServer(opts: {
         const channel = String(body.channel ?? "");
         const ts = String(body.ts ?? "");
         repliesCalls.push({ channel, ts });
+        opts.onRepliesCalled?.();
+        if (opts.repliesDelayMs) {
+          await Bun.sleep(opts.repliesDelayMs);
+        }
         if (opts.failRepliesError) {
           return Response.json({ ok: false, error: opts.failRepliesError });
         }
@@ -195,6 +202,9 @@ export function createMockSlackServer(opts: {
       }
       if (method === "chat.postMessage") {
         postCounter++;
+        if (opts.failPostOnCall !== undefined && postCounter === opts.failPostOnCall) {
+          return Response.json({ ok: false, error: "channel_not_found" });
+        }
         const msg: PostedMessage = {
           channel: String(body.channel ?? ""),
           ...(typeof body.thread_ts === "string" ? { thread_ts: body.thread_ts } : {}),
@@ -223,7 +233,7 @@ export function createMockSlackServer(opts: {
 
   let envSeq = 0;
   const emitEvent = (event: Record<string, unknown>) => {
-    const ws = [...wsClients][0];
+    const ws = [...wsClients].find((client) => client.readyState === WebSocket.OPEN);
     if (!ws) throw new Error("no ws connected");
     envSeq++;
     ws.send(

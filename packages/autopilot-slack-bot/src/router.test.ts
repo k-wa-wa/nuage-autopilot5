@@ -231,4 +231,41 @@ describe("EventRouter", () => {
     );
     expect(res?.messageTs).toBe("500.1");
   });
+
+  test("hasProcessedMessage が true のイベントは再起動後の再配信でも除外する", () => {
+    const router = new EventRouter();
+    const ctx: RouteContext = {
+      identity,
+      isParticipatingThread: () => true,
+      hasProcessedMessage: (_ch, threadTs, msgTs) => threadTs === "100.1" && msgTs === "100.2",
+    };
+
+    expect(
+      router.route(
+        {
+          type: "app_mention",
+          channel: "C01",
+          user: "U_HUMAN",
+          ts: "100.2",
+          thread_ts: "100.1",
+          text: "<@U_BOT_DYNAMIC> もう処理済み",
+        },
+        ctx,
+      ),
+    ).toBeNull();
+
+    expect(
+      router.route(
+        {
+          type: "message",
+          channel: "C01",
+          user: "U_HUMAN",
+          ts: "100.3",
+          thread_ts: "100.1",
+          text: "未処理の返信",
+        },
+        ctx,
+      )?.messageTs,
+    ).toBe("100.3");
+  });
 });

@@ -31,6 +31,7 @@ export interface RouteDecision {
 export interface RouteContext {
   identity: BotIdentity;
   isParticipatingThread: (channel: string, threadTs: string) => boolean;
+  hasProcessedMessage?: (channel: string, threadTs: string, messageTs: string) => boolean;
 }
 
 /**
@@ -107,6 +108,12 @@ export class EventRouter {
     const dedupKey = `${event.channel}:${event.ts}`;
     this.pruneSeen(nowMs);
     if (this.seen.has(dedupKey)) return null;
+
+    const threadTs = resolveThreadTs(event);
+    if (ctx.hasProcessedMessage?.(event.channel, threadTs, event.ts)) {
+      this.recordSeen(dedupKey, nowMs);
+      return null;
+    }
 
     for (const rule of this.rules) {
       const decision = rule(event, ctx);

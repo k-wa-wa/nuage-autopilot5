@@ -13,6 +13,7 @@ export interface ThreadSessionState {
   effort?: string;
   sessionId: string | null;
   lastProcessedTs: string | null;
+  processedTs?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -68,6 +69,13 @@ export class ThreadSessionStore {
         ...(typeof parsed.effort === "string" ? { effort: parsed.effort } : {}),
         sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null,
         lastProcessedTs: typeof parsed.lastProcessedTs === "string" ? parsed.lastProcessedTs : null,
+        ...(Array.isArray(parsed.processedTs)
+          ? {
+              processedTs: parsed.processedTs.filter(
+                (v): v is string => typeof v === "string" && v.length > 0,
+              ),
+            }
+          : {}),
         createdAt:
           typeof parsed.createdAt === "string" ? parsed.createdAt : new Date().toISOString(),
         updatedAt:
@@ -80,6 +88,12 @@ export class ThreadSessionStore {
 
   hasParticipated(channel: string, threadTs: string): boolean {
     return Boolean(this.get(channel, threadTs)?.participated);
+  }
+
+  hasProcessedMessage(channel: string, threadTs: string, messageTs: string): boolean {
+    const state = this.get(channel, threadTs);
+    if (!state) return false;
+    return state.lastProcessedTs === messageTs || Boolean(state.processedTs?.includes(messageTs));
   }
 
   save(state: ThreadSessionState): void {

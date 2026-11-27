@@ -72,4 +72,26 @@ describe("ThreadSessionStore", () => {
     writeFileSync(join(store.dir, file!), "{broken");
     expect(store.get("C01", "100.1")).toBeNull();
   });
+
+  test("hasProcessedMessage は lastProcessedTs と processedTs の両方を照合する", () => {
+    dir = mkdtempSync(join(tmpdir(), "autopilot-slack-state-"));
+    const store = new ThreadSessionStore(dir, "bot-a");
+    store.save({
+      botName: "bot-a",
+      channel: "C01",
+      threadTs: "100.1",
+      participated: true,
+      agent: "claude",
+      sessionId: "sess-1",
+      lastProcessedTs: "100.3",
+      processedTs: ["100.1", "100.2", "100.3"],
+      createdAt: "2026-11-27T00:00:00.000Z",
+      updatedAt: "2026-11-27T00:01:00.000Z",
+    });
+
+    expect(store.hasProcessedMessage("C01", "100.1", "100.1")).toBe(true);
+    expect(store.hasProcessedMessage("C01", "100.1", "100.2")).toBe(true);
+    expect(store.hasProcessedMessage("C01", "100.1", "100.3")).toBe(true);
+    expect(store.hasProcessedMessage("C01", "100.1", "100.4")).toBe(false);
+  });
 });

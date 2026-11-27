@@ -230,6 +230,28 @@ export class SlackWebClient {
         retryable: false,
       });
     }
+    let parsedWs: URL;
+    try {
+      parsedWs = new URL(data.url);
+    } catch {
+      throw new SlackApiError(`apps.connections.open: 不正な WebSocket URL (${data.url})`, {
+        code: "invalid_response",
+        retryable: false,
+      });
+    }
+    const apiProto = new URL(this.apiBaseUrl).protocol;
+    if (apiProto === "https:" && parsedWs.protocol !== "wss:") {
+      throw new SlackApiError(
+        `apps.connections.open: HTTPS 接続時は wss:// の WebSocket URL が必要である (${parsedWs.protocol})`,
+        { code: "insecure_ws_url", retryable: false },
+      );
+    }
+    if (parsedWs.protocol !== "wss:" && parsedWs.protocol !== "ws:") {
+      throw new SlackApiError(
+        `apps.connections.open: 未対応の WebSocket スキーム (${parsedWs.protocol})`,
+        { code: "invalid_response", retryable: false },
+      );
+    }
     return data.url;
   }
 
@@ -238,7 +260,7 @@ export class SlackWebClient {
     let cursor = "";
 
     for (let page = 0; page < 10; page++) {
-      const body: Record<string, unknown> = { channel, ts, limit: 200 };
+      const body: Record<string, unknown> = { channel, ts, limit: 1000 };
       if (cursor) body.cursor = cursor;
       const data = await this.callWithRetry("conversations.replies", this.botTokenProvider, body);
       if (Array.isArray(data.messages)) {
@@ -251,6 +273,9 @@ export class SlackWebClient {
               ...(typeof item.username === "string" ? { username: item.username } : {}),
               ...(typeof item.text === "string" ? { text: item.text } : {}),
               ...(typeof item.thread_ts === "string" ? { thread_ts: item.thread_ts } : {}),
+              ...(typeof item.reply_count === "number" && Number.isFinite(item.reply_count)
+                ? { reply_count: item.reply_count }
+                : {}),
               ...(typeof item.url === "string" && item.url ? { url: item.url } : {}),
               ...(typeof item.details === "string" && item.details
                 ? { details: item.details }
@@ -289,7 +314,8 @@ export class SlackWebClient {
       text: params.text,
     };
     if (params.thread_ts) body.thread_ts = params.thread_ts;
-    const data = await this.callWithRetry("chat.postMessage", this.botTokenProvider, body);
+    // chat.postMessage は副作用があり冪等キーが無いため、通信エラー時の自動再送による重複投稿を防ぐ。
+    const data = await this.callApi("chat.postMessage", this.botTokenProvider, body);
     return {
       channel: typeof data.channel === "string" ? data.channel : params.channel,
       ts: typeof data.ts === "string" ? data.ts : "",
@@ -307,6 +333,7 @@ export interface SocketModeClientOptions {
   helloTimeoutMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
+  minStableConnectionMs?: number;
   createWebSocket?: (url: string) => WebSocket;
 }
 
@@ -333,6 +360,7 @@ export class SocketModeClient {
   private readonly helloTimeoutMs: number;
   private readonly initialBackoffMs: number;
   private readonly maxBackoffMs: number;
+  private readonly minStableConnectionMs: number;
   private readonly createWebSocket: (url: string) => WebSocket;
 
   private stopController = new AbortController();
@@ -349,6 +377,7 @@ export class SocketModeClient {
     this.helloTimeoutMs = opts.helloTimeoutMs ?? 15_000;
     this.initialBackoffMs = opts.initialBackoffMs ?? 1000;
     this.maxBackoffMs = opts.maxBackoffMs ?? 30_000;
+    this.minStableConnectionMs = opts.minStableConnectionMs ?? 10_000;
     this.createWebSocket = opts.createWebSocket ?? ((url) => new WebSocket(url));
   }
 
@@ -388,26 +417,21 @@ export class SocketModeClient {
 
       if (this.stopped) break;
 
+      const attemptStartedAt = Date.now();
       const outcome = await this.connectOnce(wsUrl);
       if (this.stopped) break;
 
-      if (outcome.helloReceived) {
+      if (outcome.helloReceived && Date.now() - attemptStartedAt >= this.minStableConnectionMs) {
         backoffMs = this.initialBackoffMs;
-      }
-
-      if (outcome.disconnectRequested) {
-        this.log("disconnect 指示により再接続する");
-        const ok = await sleepWithAbort(
-          Math.min(this.initialBackoffMs, 200),
-          this.stopController.signal,
-        );
-        if (!ok) break;
-        continue;
       }
 
       const jitter = Math.floor(backoffMs * 0.2 * Math.random());
       const waitMs = backoffMs + jitter;
-      this.warn(`Socket Mode 切断。${waitMs}ms 後に再接続する`);
+      if (outcome.disconnectRequested) {
+        this.log(`disconnect 指示により ${waitMs}ms 後に再接続する`);
+      } else {
+        this.warn(`Socket Mode 切断。${waitMs}ms 後に再接続する`);
+      }
       const ok = await sleepWithAbort(waitMs, this.stopController.signal);
       if (!ok) break;
       backoffMs = Math.min(backoffMs * 2, this.maxBackoffMs);
