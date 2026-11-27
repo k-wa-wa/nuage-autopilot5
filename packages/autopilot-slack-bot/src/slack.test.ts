@@ -1,0 +1,172 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import type { ServerWebSocket } from "bun";
+import { SlackApiError, SlackWebClient, SocketModeClient } from "./slack.ts";
+
+let servers: Array<{ stop: (closeActive?: boolean) => void }> = [];
+afterEach(() => {
+  for (const s of servers) s.stop(true);
+  servers = [];
+});
+
+describe("SlackWebClient", () => {
+  test("auth.test 未準備 (503) をリトライして user_id / bot_id を取得する", async () => {
+    let attempts = 0;
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/slack/api/auth.test") {
+          attempts++;
+          if (attempts < 3) {
+            return new Response(JSON.stringify({ ok: false, error: "unavailable" }), {
+              status: 503,
+            });
+          }
+          return Response.json({
+            ok: true,
+            user_id: "U_DYN_99",
+            bot_id: "B_DYN_99",
+            user: "dyn-bot",
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    servers.push(srv);
+
+    const client = new SlackWebClient({
+      apiBaseUrl: `http://127.0.0.1:${srv.port}/slack/api/`,
+      botToken: "xoxb-spiffe",
+      appToken: "xapp-spiffe",
+    });
+
+    const id = await client.waitForAuthTest({ initialDelayMs: 10, maxDelayMs: 20 });
+    expect(attempts).toBe(3);
+    expect(id).toEqual({ userId: "U_DYN_99", botId: "B_DYN_99", userName: "dyn-bot" });
+  });
+
+  test("invalid_auth はリトライせず即失敗する", async () => {
+    let attempts = 0;
+    const srv = Bun.serve({
+      port: 0,
+      fetch() {
+        attempts++;
+        return Response.json({ ok: false, error: "invalid_auth" });
+      },
+    });
+    servers.push(srv);
+
+    const client = new SlackWebClient({
+      apiBaseUrl: `http://127.0.0.1:${srv.port}/slack/api`,
+      botToken: "bad",
+      appToken: "bad",
+    });
+
+    await expect(client.waitForAuthTest({ initialDelayMs: 10 })).rejects.toBeInstanceOf(
+      SlackApiError,
+    );
+    expect(attempts).toBe(1);
+  });
+});
+
+describe("SocketModeClient", () => {
+  test("hello 受信・events_api の ack・disconnect 再接続・無通信タイムアウト再接続を行う", async () => {
+    let openCalls = 0;
+    let connCount = 0;
+    const acked: string[] = [];
+    const receivedEvents: string[] = [];
+    const sockets: ServerWebSocket<{ conn: number }>[] = [];
+
+    let port = 0;
+    let sm: SocketModeClient | null = null;
+    const srv = Bun.serve<{ conn: number }>({
+      port: 0,
+      fetch(req, server) {
+        const url = new URL(req.url);
+        if (url.pathname === "/slack/api/apps.connections.open") {
+          openCalls++;
+          return Response.json({
+            ok: true,
+            url: `ws://127.0.0.1:${port}/slack/socket?ticket=t-${openCalls}`,
+          });
+        }
+        if (url.pathname === "/slack/socket") {
+          if (server.upgrade(req, { data: { conn: ++connCount } })) return undefined;
+        }
+        return new Response("not found", { status: 404 });
+      },
+      websocket: {
+        open(ws) {
+          sockets.push(ws);
+          ws.send(JSON.stringify({ type: "hello", num_connections: ws.data.conn }));
+          if (ws.data.conn === 1) {
+            ws.send(
+              JSON.stringify({
+                envelope_id: "env-1",
+                type: "events_api",
+                payload: {
+                  type: "event_callback",
+                  event: { type: "app_mention", channel: "C1", ts: "10.1", user: "U1", text: "hi" },
+                },
+              }),
+            );
+          } else if (ws.data.conn === 2) {
+            // 2 回目の接続は完全に無通信にして無通信タイムアウトで切れることを確かめる
+          } else if (ws.data.conn === 3) {
+            ws.send(
+              JSON.stringify({
+                envelope_id: "env-3",
+                type: "events_api",
+                payload: {
+                  type: "event_callback",
+                  event: { type: "app_mention", channel: "C1", ts: "10.3", user: "U1", text: "ok" },
+                },
+              }),
+            );
+          }
+        },
+        message(ws, raw) {
+          const parsed = JSON.parse(String(raw)) as { envelope_id?: string };
+          if (parsed.envelope_id) {
+            acked.push(parsed.envelope_id);
+            if (ws.data.conn === 1) {
+              // ack 受領後にサーバーから disconnect を送る
+              ws.send(JSON.stringify({ type: "disconnect", reason: "refresh_requested" }));
+            } else if (ws.data.conn === 3 && parsed.envelope_id === "env-3") {
+              sm?.stop();
+            }
+          }
+        },
+      },
+    });
+    port = srv.port ?? 0;
+    servers.push(srv);
+
+    const client = new SlackWebClient({
+      apiBaseUrl: `http://127.0.0.1:${srv.port}/slack/api`,
+      botToken: "xoxb-spiffe",
+      appToken: "xapp-spiffe",
+    });
+
+    const warnings: string[] = [];
+    sm = new SocketModeClient({
+      client,
+      onEvent: (ev) => {
+        if (ev.ts) receivedEvents.push(ev.ts);
+      },
+      warn: (m) => warnings.push(m),
+      pingIntervalMs: 0, // conn 2 の無通信タイムアウトを直接テストするため ping を止める
+      inactivityTimeoutMs: 120,
+      helloTimeoutMs: 500,
+      initialBackoffMs: 20,
+      maxBackoffMs: 50,
+    });
+
+    await sm.start();
+
+    expect(connCount).toBeGreaterThanOrEqual(3);
+    expect(acked).toEqual(["env-1", "env-3"]);
+    expect(receivedEvents).toEqual(["10.1", "10.3"]);
+    expect(warnings.some((w) => w.includes("無通信タイムアウト"))).toBe(true);
+  });
+});

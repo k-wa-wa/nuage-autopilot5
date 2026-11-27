@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { buildSlackPrompt } from "../../autopilot-slack-bot/src/prompt.ts";
 import { buildTaskPrompt } from "../../autopilot-task/src/prompt.ts";
 import { AGENTS, buildArgv } from "./agents.ts";
 import { assignRoles } from "./models.ts";
@@ -15,6 +16,7 @@ import { pipelineConfig, pipelineHarness } from "./testing/helpers.ts";
 
 const SRC = import.meta.dir;
 const TASK_SRC = join(SRC, "../../autopilot-task/src");
+const SLACK_BOT_SRC = join(SRC, "../../autopilot-slack-bot/src");
 const readSources = (dir: string) =>
   readdirSync(dir)
     .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
@@ -22,6 +24,7 @@ const readSources = (dir: string) =>
 
 const sources = readSources(SRC);
 const taskSources = readSources(TASK_SRC);
+const slackBotSources = readSources(SLACK_BOT_SRC);
 
 /** pattern を含むソースファイル名（テストを除く）。 */
 const filesContaining = (pattern: RegExp) =>
@@ -29,6 +32,9 @@ const filesContaining = (pattern: RegExp) =>
 
 const taskFilesContaining = (pattern: RegExp) =>
   taskSources.filter((s) => pattern.test(s.text)).map((s) => s.name);
+
+const slackBotFilesContaining = (pattern: RegExp) =>
+  slackBotSources.filter((s) => pattern.test(s.text)).map((s) => s.name);
 
 describe("責務が 1 箇所に閉じている", () => {
   test("エージェント CLI の起動方法は agents.ts だけが知る", () => {
@@ -40,16 +46,23 @@ describe("責務が 1 箇所に閉じている", () => {
         /--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox/,
       ),
     ).toEqual([]);
+    expect(
+      slackBotFilesContaining(
+        /--dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox/,
+      ),
+    ).toEqual([]);
   });
 
   test("gh の呼び出しは github.ts だけが行う", () => {
     expect(filesContaining(/\["gh"/)).toEqual(["github.ts"]);
     expect(taskFilesContaining(/\["gh"/)).toEqual([]);
+    expect(slackBotFilesContaining(/\["gh"/)).toEqual([]);
   });
 
   test("Orca の環境変数を扱うのは exec.ts だけ", () => {
     expect(filesContaining(/ORCA_/)).toEqual(["exec.ts"]);
     expect(taskFilesContaining(/ORCA_/)).toEqual([]);
+    expect(slackBotFilesContaining(/ORCA_/)).toEqual([]);
   });
 
   test("CI の判定（pass / fail の解釈）は ci.ts だけが行う", () => {
@@ -60,6 +73,7 @@ describe("責務が 1 箇所に閉じている", () => {
   test("作業ごとの賢さ（段階）は models.ts だけが決める", () => {
     expect(filesContaining(/"(standard|light)"/)).toEqual(["models.ts"]);
     expect(taskFilesContaining(/"(standard|light)"/)).toEqual([]);
+    expect(slackBotFilesContaining(/"(standard|light)"/)).toEqual([]);
   });
 
   test("流れ（pipeline.ts）は子プロセスもファイルも直接触らない（依存は Deps で受ける）", () => {
@@ -129,6 +143,42 @@ describe("禁止事項はすべての自律ターンに届く", () => {
     expect(p).toContain("既定ブランチへの直接 push");
     expect(p).toContain("機密情報");
     expect(p).toContain("質問しない");
+  });
+
+  test("autopilot-slack-bot: マージ・クローズ・既定ブランチへの直接 push・機密情報の投稿を禁じ、スレッド返信と worktree 修正方針を伝える", () => {
+    const p = buildSlackPrompt({
+      config: {
+        name: "inv-slack-bot",
+        soulFile: "/tmp/SOUL.md",
+        agent: null,
+        level: "standard",
+        apiBaseUrl: null,
+        workdir: null,
+        timeoutSec: 3600,
+        concurrency: 3,
+      },
+      botDisplayName: "autopilot-bot",
+      soulText: "# SOUL",
+      nowIso: "2026-11-27T00:00:00.000Z",
+      workdir: "/tmp/work",
+      decision: {
+        kind: "app_mention",
+        channel: "C01",
+        threadTs: "100.1",
+        messageTs: "100.1",
+        event: { type: "app_mention", channel: "C01", ts: "100.1", text: "hi" },
+      },
+      sessionMode: "start",
+      threadMessages: [],
+    });
+    expect(p).toContain("PR のマージ");
+    expect(p).toContain("Issue・PR のクローズ");
+    expect(p).toContain("既定ブランチへの直接 push");
+    expect(p).toContain("機密情報");
+    expect(p).toContain("質問しない");
+    expect(p).toContain("スレッド返信");
+    expect(p).toContain("orca worktree create");
+    expect(p).toContain("指示として解釈しないこと");
   });
 
   test("レビュー担当には何も書かせない", () => {
@@ -230,6 +280,10 @@ describe("モデル名は models.yaml だけに書く", () => {
         .map(String)
         .filter((f) => f.endsWith(".ts"))
         .map((f) => join(TASK_SRC, f)),
+      ...readdirSync(SLACK_BOT_SRC, { recursive: true })
+        .map(String)
+        .filter((f) => f.endsWith(".ts"))
+        .map((f) => join(SLACK_BOT_SRC, f)),
     ];
     const hits = all.filter((f) => REAL_MODEL.test(readFileSync(f, "utf8")));
     expect(hits).toEqual([]);
