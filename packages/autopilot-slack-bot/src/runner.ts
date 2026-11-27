@@ -77,6 +77,17 @@ function sanitizeFileSegment(s: string): string {
   return s.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 48) || "turn";
 }
 
+function buildAgentEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<string, undefined> {
+  const overrides: Record<string, undefined> = {
+    SLACK_BOT_TOKEN: undefined,
+    SLACK_APP_TOKEN: undefined,
+  };
+  for (const key of Object.keys(env)) {
+    if (/^SLACK_.*_TOKEN$/.test(key)) overrides[key] = undefined;
+  }
+  return overrides;
+}
+
 interface AgentExecutionSuccess {
   ok: true;
   inv: Invocation;
@@ -155,7 +166,6 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
 
   const shutdownController = new AbortController();
   let socketClient: SocketModeClient | null = null;
-  let exitCode = 0;
 
   const onSignal = (sig: NodeJS.Signals) => {
     log(`シグナル ${sig} を受信したため停止する`);
@@ -227,6 +237,7 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
         logPath,
         stdoutPath,
         timeoutMs: remainingMs,
+        env: buildAgentEnvOverrides(),
       });
 
       if (shutdownController.signal.aborted) {
@@ -285,148 +296,187 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
   const handleDecision = async (decision: RouteDecision, identity: BotIdentity): Promise<void> => {
     const key = threadKey(decision.channel, decision.threadTs);
     const turnId = `${sanitizeFileSegment(decision.channel)}-${sanitizeFileSegment(decision.messageTs)}-${randomUUID().slice(0, 8)}`;
-    log(`スレッド処理開始: key=${key}, trigger=${decision.kind}, ts=${decision.messageTs}`);
-
-    const soulText = readFileSync(config.soulFile, "utf8");
-    const modelsPath = process.env.AUTOPILOT_MODELS || MODELS_PATH;
-    const models = loadModelTable(modelsPath) ?? {};
-    const chain = resolveTaskChain(config.agent, config.level, models);
-    const botDisplayName = identity.userName ?? config.name;
-    const deadline = Date.now() + config.timeoutSec * 1000;
-
     const saved = sessionStore.get(decision.channel, decision.threadTs);
-    let result: AgentExecutionResult | null = null;
 
-    if (saved?.agent && saved.sessionId) {
-      const resumeInv: Invocation = {
-        agent: saved.agent,
-        ...(saved.model ? { model: saved.model } : {}),
-        ...(saved.effort ? { effort: saved.effort } : {}),
-      };
-      const sessionReq: SessionRequest = { kind: "resume", id: saved.sessionId };
-      const resumePrompt = buildSlackPrompt({
-        config,
-        botDisplayName,
-        soulText,
-        nowIso: new Date().toISOString(),
-        workdir,
-        decision,
-        sessionMode: "resume",
-        threadMessages: null,
-      });
+    try {
+      log(`スレッド処理開始: key=${key}, trigger=${decision.kind}, ts=${decision.messageTs}`);
 
-      const beforeWorkdir = await snapshotWorkdir(workdir);
-      const stdoutPath = join(agentStdoutDir, `${turnId}-${resumeInv.agent}-resume.log`);
-      log(`-> ${formatInvocation(resumeInv)} (会話 ${saved.sessionId} の続き)`);
-      const adapter = getAgentAdapter(resumeInv.agent);
-      const r = await run(adapter.buildArgv(resumeInv, resumePrompt, sessionReq), {
-        cwd: workdir,
-        logPath,
-        stdoutPath,
-        timeoutMs: Math.max(1, deadline - Date.now()),
-      });
+      const soulText = readFileSync(config.soulFile, "utf8");
+      const modelsPath = process.env.AUTOPILOT_MODELS || MODELS_PATH;
+      const models = loadModelTable(modelsPath) ?? {};
+      const chain = resolveTaskChain(config.agent, config.level, models);
+      const botDisplayName = identity.userName ?? config.name;
+      const deadline = Date.now() + config.timeoutSec * 1000;
+
+      let result: AgentExecutionResult | null = null;
+
+      if (saved?.agent && saved.sessionId) {
+        const resumeInv: Invocation = {
+          agent: saved.agent,
+          ...(saved.model ? { model: saved.model } : {}),
+          ...(saved.effort ? { effort: saved.effort } : {}),
+        };
+        const sessionReq: SessionRequest = { kind: "resume", id: saved.sessionId };
+        const resumePrompt = buildSlackPrompt({
+          config,
+          botDisplayName,
+          soulText,
+          nowIso: new Date().toISOString(),
+          workdir,
+          decision,
+          sessionMode: "resume",
+          threadMessages: null,
+        });
+
+        const beforeWorkdir = await snapshotWorkdir(workdir);
+        const stdoutPath = join(agentStdoutDir, `${turnId}-${resumeInv.agent}-resume.log`);
+        log(`-> ${formatInvocation(resumeInv)} (会話 ${saved.sessionId} の続き)`);
+        const adapter = getAgentAdapter(resumeInv.agent);
+        const r = await run(adapter.buildArgv(resumeInv, resumePrompt, sessionReq), {
+          cwd: workdir,
+          logPath,
+          stdoutPath,
+          timeoutMs: Math.max(1, deadline - Date.now()),
+          env: buildAgentEnvOverrides(),
+        });
+
+        if (shutdownController.signal.aborted) return;
+
+        if (r.timedOut) {
+          result = {
+            ok: false,
+            timedOut: true,
+            reason: `${formatInvocation(resumeInv)}: タイムアウト (${config.timeoutSec}s) した`,
+          };
+        } else {
+          const out = adapter.readResult(r, sessionReq);
+          if (out.text) {
+            appendFileSync(logPath, out.text.endsWith("\n") ? out.text : `${out.text}\n`);
+          }
+          if (out.failure === null) {
+            result = {
+              ok: true,
+              inv: resumeInv,
+              sessionId: out.session ?? saved.sessionId,
+              text: out.text,
+            };
+          } else {
+            const afterWorkdir = await snapshotWorkdir(workdir);
+            if (out.failure !== "unavailable") {
+              const reason = `${formatInvocation(resumeInv)}: resume が異常終了 (exit ${r.code}) したため新規セッションへ切り替えない`;
+              error(reason);
+              result = { ok: false, timedOut: false, reason };
+            } else if (afterWorkdir !== beforeWorkdir) {
+              const reason = `${formatInvocation(resumeInv)}: resume 中に作業ディレクトリを変更した後に利用不能 (exit ${r.code}) となったため新規セッションへ切り替えない`;
+              error(reason);
+              result = { ok: false, timedOut: false, reason };
+            } else {
+              warn(
+                `${formatInvocation(resumeInv)}: resume が利用不能 (exit ${r.code}) のためスレッド履歴を読み直して新規セッションで引き継ぐ`,
+              );
+              const threadMessages = await fetchThreadMessagesSafe(
+                decision.channel,
+                decision.threadTs,
+              );
+              const fallbackPrompt = buildSlackPrompt({
+                config,
+                botDisplayName,
+                soulText,
+                nowIso: new Date().toISOString(),
+                workdir,
+                decision,
+                sessionMode: "fallback-start",
+                threadMessages,
+              });
+              result = await runAgentChain(fallbackPrompt, chain, deadline, turnId);
+            }
+          }
+        }
+      } else {
+        const threadMessages = await fetchThreadMessagesSafe(decision.channel, decision.threadTs);
+        const startPrompt = buildSlackPrompt({
+          config,
+          botDisplayName,
+          soulText,
+          nowIso: new Date().toISOString(),
+          workdir,
+          decision,
+          sessionMode: "start",
+          threadMessages,
+        });
+        result = await runAgentChain(startPrompt, chain, deadline, turnId);
+      }
 
       if (shutdownController.signal.aborted) return;
 
-      if (r.timedOut) {
-        result = {
-          ok: false,
-          timedOut: true,
-          reason: `${formatInvocation(resumeInv)}: タイムアウト (${config.timeoutSec}s) した`,
-        };
-      } else {
-        const out = adapter.readResult(r, sessionReq);
-        if (out.text) {
-          appendFileSync(logPath, out.text.endsWith("\n") ? out.text : `${out.text}\n`);
-        }
-        if (out.failure === null) {
-          result = {
-            ok: true,
-            inv: resumeInv,
-            sessionId: out.session ?? saved.sessionId,
-            text: out.text,
-          };
-        } else {
-          const afterWorkdir = await snapshotWorkdir(workdir);
-          if (afterWorkdir !== beforeWorkdir) {
-            const reason = `${formatInvocation(resumeInv)}: resume 中に作業ディレクトリを変更した後に失敗 (exit ${r.code}) したため新規セッションへ切り替えない`;
-            error(reason);
-            result = { ok: false, timedOut: false, reason };
-          } else {
-            warn(
-              `${formatInvocation(resumeInv)}: resume が失敗 (${out.failure}, exit ${r.code}) したためスレッド履歴を読み直して新規セッションで引き継ぐ`,
-            );
-            const threadMessages = await fetchThreadMessagesSafe(
-              decision.channel,
-              decision.threadTs,
-            );
-            const fallbackPrompt = buildSlackPrompt({
-              config,
-              botDisplayName,
-              soulText,
-              nowIso: new Date().toISOString(),
-              workdir,
-              decision,
-              sessionMode: "fallback-start",
-              threadMessages,
-            });
-            result = await runAgentChain(fallbackPrompt, chain, deadline, turnId);
-          }
-        }
-      }
-    } else {
-      const threadMessages = await fetchThreadMessagesSafe(decision.channel, decision.threadTs);
-      const startPrompt = buildSlackPrompt({
-        config,
-        botDisplayName,
-        soulText,
-        nowIso: new Date().toISOString(),
-        workdir,
-        decision,
-        sessionMode: "start",
-        threadMessages,
-      });
-      result = await runAgentChain(startPrompt, chain, deadline, turnId);
-    }
-
-    if (shutdownController.signal.aborted) return;
-
-    const nowIso = new Date().toISOString();
-    if (result.ok) {
-      const replied = await postReply(decision.channel, decision.threadTs, result.text);
-      sessionStore.save({
-        botName: config.name,
-        channel: decision.channel,
-        threadTs: decision.threadTs,
-        participated: replied || Boolean(saved?.participated),
-        agent: result.inv.agent,
-        ...(result.inv.model ? { model: result.inv.model } : {}),
-        ...(result.inv.effort ? { effort: result.inv.effort } : {}),
-        sessionId: result.sessionId,
-        lastProcessedTs: decision.messageTs,
-        createdAt: saved?.createdAt ?? nowIso,
-        updatedAt: nowIso,
-      });
-      log(`スレッド処理完了: key=${key}`);
-    } else {
-      error(`スレッド処理失敗: key=${key} reason=${result.reason}`);
-      const replied = await postReply(
-        decision.channel,
-        decision.threadTs,
-        `[エラー] 調査・処理に失敗した: ${result.reason}`,
-      );
-      if (replied && !saved) {
+      const nowIso = new Date().toISOString();
+      if (result.ok) {
+        const replied = await postReply(decision.channel, decision.threadTs, result.text);
         sessionStore.save({
           botName: config.name,
           channel: decision.channel,
           threadTs: decision.threadTs,
-          participated: true,
-          agent: null,
-          sessionId: null,
+          participated: replied || Boolean(saved?.participated),
+          agent: result.inv.agent,
+          ...(result.inv.model ? { model: result.inv.model } : {}),
+          ...(result.inv.effort ? { effort: result.inv.effort } : {}),
+          sessionId: result.sessionId,
           lastProcessedTs: decision.messageTs,
-          createdAt: nowIso,
+          createdAt: saved?.createdAt ?? nowIso,
           updatedAt: nowIso,
         });
+        log(`スレッド処理完了: key=${key}`);
+      } else {
+        error(`スレッド処理失敗: key=${key} reason=${result.reason}`);
+        const replied = await postReply(
+          decision.channel,
+          decision.threadTs,
+          `[エラー] 調査・処理に失敗した: ${result.reason}`,
+        );
+        if (replied && !saved) {
+          sessionStore.save({
+            botName: config.name,
+            channel: decision.channel,
+            threadTs: decision.threadTs,
+            participated: true,
+            agent: null,
+            sessionId: null,
+            lastProcessedTs: decision.messageTs,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          });
+        }
+      }
+    } catch (e) {
+      if (shutdownController.signal.aborted) return;
+      const reason = e instanceof Error ? e.message : String(e);
+      error(`スレッド処理中に予期しないエラー: key=${key} reason=${reason}`);
+      const replied = await postReply(
+        decision.channel,
+        decision.threadTs,
+        `[エラー] 調査・処理中にエラーが発生した: ${reason}`,
+      );
+      if (replied && !saved) {
+        const nowIso = new Date().toISOString();
+        try {
+          sessionStore.save({
+            botName: config.name,
+            channel: decision.channel,
+            threadTs: decision.threadTs,
+            participated: true,
+            agent: null,
+            sessionId: null,
+            lastProcessedTs: decision.messageTs,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          });
+        } catch (saveErr) {
+          error(
+            `セッション状態の保存に失敗: key=${key} reason=${
+              saveErr instanceof Error ? saveErr.message : String(saveErr)
+            }`,
+          );
+        }
       }
     }
   };
@@ -456,10 +506,18 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
       if (!decision) return;
 
       const key = threadKey(decision.channel, decision.threadTs);
-      void queue.enqueue(key, async () => {
-        if (shutdownController.signal.aborted) return;
-        await handleDecision(decision, identity);
-      });
+      void queue
+        .enqueue(key, async () => {
+          if (shutdownController.signal.aborted) return;
+          await handleDecision(decision, identity);
+        })
+        .catch((err) => {
+          error(
+            `キュー実行中に未処理エラー: key=${key} reason=${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
     };
 
     socketClient = new SocketModeClient({
@@ -477,13 +535,15 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
     await socketClient.start();
     await queue.drain();
     log("停止完了");
-    return exitCode;
+    return 0;
   } catch (e) {
     if (shutdownController.signal.aborted) {
+      await queue.drain();
       return 0;
     }
     error(e instanceof Error ? e.message : String(e));
-    exitCode = 1;
+    socketClient?.stop();
+    await queue.drain();
     return 1;
   } finally {
     for (const sig of signals) process.off(sig, onSignal);

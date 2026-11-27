@@ -21,6 +21,19 @@ export function cleanEnv(env: NodeJS.ProcessEnv = process.env): Record<string, s
   return out;
 }
 
+export function mergeCleanEnv(
+  overrides?: Record<string, string | undefined>,
+  base: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const out = cleanEnv(base);
+  if (!overrides) return out;
+  for (const [k, v] of Object.entries(overrides)) {
+    if (v === undefined) delete out[k];
+    else if (!k.startsWith("ORCA_")) out[k] = v;
+  }
+  return out;
+}
+
 export interface RunOptions {
   cwd: string;
   /** 標準出力の書き込み先。省略時は logPath に追記する。 */
@@ -29,6 +42,8 @@ export interface RunOptions {
   logPath: string;
   /** 指定ミリ秒を超えたら子プロセスグループごと停止する。 */
   timeoutMs?: number;
+  /** 子プロセス環境変数の上書き・削除（ORCA_* は常に除外、undefined 指定キーを削除）。 */
+  env?: Record<string, string | undefined>;
 }
 
 export interface RunResult {
@@ -75,7 +90,7 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       cwd: opts.cwd,
-      env: cleanEnv(),
+      env: mergeCleanEnv(opts.env),
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
     });
@@ -128,11 +143,11 @@ export function run(argv: string[], opts: RunOptions): Promise<RunResult> {
 export function capture(
   argv: string[],
   cwd: string,
-  opts: { trim?: boolean; timeoutMs?: number; env?: Record<string, string> } = {},
+  opts: { trim?: boolean; timeoutMs?: number; env?: Record<string, string | undefined> } = {},
 ): Promise<RunResult & { stderr: string }> {
   const [cmd, ...args] = argv;
   if (!cmd) throw new Error("empty argv");
-  const env = opts.env ? { ...cleanEnv(), ...opts.env } : cleanEnv();
+  const env = mergeCleanEnv(opts.env);
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       cwd,
