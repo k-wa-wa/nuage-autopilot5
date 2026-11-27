@@ -55,7 +55,7 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 const prompt = args.at(-1) ?? "";
 const envOrca = Object.keys(process.env).filter((k) => k.startsWith("ORCA_"));
-const envSlackTokens = Object.keys(process.env).filter((k) => /^SLACK_.*_TOKEN$/.test(k));
+const envSlackTokens = Object.keys(process.env).filter((k) => /^SLACK_.*_TOKEN(?:_FILE)?$/.test(k));
 appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ agent: ${JSON.stringify(name)}, args, prompt, cwd: process.cwd(), envOrca, envSlackTokens }) + "\\n");
 
 const idx = Number(readFileSync(${JSON.stringify(counterPath)}, "utf8")) + 1;
@@ -88,6 +88,8 @@ process.exit(step.code ?? 0);
     SLACK_API_BASE_URL: process.env.SLACK_API_BASE_URL,
     SLACK_BOT_TOKEN: process.env.SLACK_BOT_TOKEN,
     SLACK_APP_TOKEN: process.env.SLACK_APP_TOKEN,
+    SLACK_BOT_TOKEN_FILE: process.env.SLACK_BOT_TOKEN_FILE,
+    SLACK_APP_TOKEN_FILE: process.env.SLACK_APP_TOKEN_FILE,
     ORCA_PANE_KEY: process.env.ORCA_PANE_KEY,
   };
 
@@ -130,6 +132,7 @@ export function createMockSlackServer(opts: {
   botId?: string;
   authFailCount?: number;
   failConnectionsOpenOnCall?: number;
+  failRepliesError?: string;
   threads?: Record<string, Array<Record<string, unknown>>>;
 }) {
   const botUserId = opts.botUserId ?? "U_CUSTOM_BOT";
@@ -139,6 +142,7 @@ export function createMockSlackServer(opts: {
 
   const posted: PostedMessage[] = [];
   const repliesCalls: Array<{ channel: string; ts: string }> = [];
+  const apiAuthHeaders: Array<{ method: string; authorization: string | null }> = [];
   const acked: string[] = [];
   const wsClients = new Set<ServerWebSocket<unknown>>();
   let postCounter = 0;
@@ -156,6 +160,7 @@ export function createMockSlackServer(opts: {
         return new Response("not found", { status: 404 });
       }
       const method = url.pathname.slice("/slack/api/".length);
+      apiAuthHeaders.push({ method, authorization: req.headers.get("authorization") });
       const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
       if (method === "auth.test") {
@@ -182,6 +187,9 @@ export function createMockSlackServer(opts: {
         const channel = String(body.channel ?? "");
         const ts = String(body.ts ?? "");
         repliesCalls.push({ channel, ts });
+        if (opts.failRepliesError) {
+          return Response.json({ ok: false, error: opts.failRepliesError });
+        }
         const messages = opts.threads?.[`${channel}:${ts}`] ?? [];
         return Response.json({ ok: true, messages, has_more: false });
       }
@@ -235,6 +243,7 @@ export function createMockSlackServer(opts: {
     baseUrl: `http://127.0.0.1:${srv.port}/slack/api/`,
     posted,
     repliesCalls,
+    apiAuthHeaders,
     acked,
     wsClients,
     emitEvent,

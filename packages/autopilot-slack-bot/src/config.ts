@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { AGENTS, type AgentName } from "../../autopilot-run/src/agents.ts";
 import { DEFAULT_TASK_LEVEL, LEVELS, type Level } from "../../autopilot-run/src/models.ts";
@@ -12,15 +13,23 @@ export interface SlackBotConfig {
   agent: AgentName | null;
   level: Level;
   apiBaseUrl: string | null;
+  botTokenFile: string | null;
+  appTokenFile: string | null;
   workdir: string | null;
   timeoutSec: number;
   concurrency: number;
 }
 
+export type TokenProvider = () => Promise<string>;
+
+export type TokenSource = { kind: "file"; path: string } | { kind: "env"; value: string };
+
 export interface SlackRuntimeEnv {
   apiBaseUrl: string;
-  botToken: string;
-  appToken: string;
+  botTokenSource: TokenSource;
+  appTokenSource: TokenSource;
+  botToken: TokenProvider;
+  appToken: TokenProvider;
 }
 
 const ALLOWED_TOP_KEYS = new Set([
@@ -29,6 +38,8 @@ const ALLOWED_TOP_KEYS = new Set([
   "agent",
   "level",
   "apiBaseUrl",
+  "botTokenFile",
+  "appTokenFile",
   "workdir",
   "timeoutSec",
   "concurrency",
@@ -148,6 +159,22 @@ export function parseSlackBotConfig(rawText: string, sourceLabel = "config"): Sl
     apiBaseUrl = normalizeApiBaseUrl(rawUrl, `${prefix}apiBaseUrl`);
   }
 
+  let botTokenFile: string | null = null;
+  if (parsed.botTokenFile !== undefined && parsed.botTokenFile !== null) {
+    botTokenFile = requireNonEmptyString(parsed.botTokenFile, `${prefix}botTokenFile`);
+    if (!isAbsolute(botTokenFile)) {
+      throw new Error(`${prefix}botTokenFile は絶対パスで指定すること: ${botTokenFile}`);
+    }
+  }
+
+  let appTokenFile: string | null = null;
+  if (parsed.appTokenFile !== undefined && parsed.appTokenFile !== null) {
+    appTokenFile = requireNonEmptyString(parsed.appTokenFile, `${prefix}appTokenFile`);
+    if (!isAbsolute(appTokenFile)) {
+      throw new Error(`${prefix}appTokenFile は絶対パスで指定すること: ${appTokenFile}`);
+    }
+  }
+
   let workdir: string | null = null;
   if (parsed.workdir !== undefined && parsed.workdir !== null) {
     workdir = requireNonEmptyString(parsed.workdir, `${prefix}workdir`);
@@ -169,6 +196,8 @@ export function parseSlackBotConfig(rawText: string, sourceLabel = "config"): Sl
     agent,
     level,
     apiBaseUrl,
+    botTokenFile,
+    appTokenFile,
     workdir,
     timeoutSec,
     concurrency,
@@ -182,9 +211,91 @@ export function loadSlackBotConfig(filePath: string): SlackBotConfig {
   return parseSlackBotConfig(readFileSync(filePath, "utf8"), filePath);
 }
 
-/** 実行時の環境変数と設定値を結合して解決する（環境変数を常に優先する）。 */
+export interface FileTokenProviderOptions {
+  label: string;
+  filePath: string;
+  maxRetries?: number;
+  retryDelayMs?: number;
+}
+
+const NON_RETRYABLE_FS_CODES = new Set(["EACCES", "EPERM", "EISDIR", "ENOTDIR", "ELOOP"]);
+
+/** 静的トークン文字列を返す TokenProvider を生成する。 */
+export function createStaticTokenProvider(token: string): TokenProvider {
+  const trimmed = token.trim();
+  return async () => {
+    if (!trimmed) {
+      throw new Error("トークンが空である");
+    }
+    return trimmed;
+  };
+}
+
+/**
+ * トークンファイルを都度読み込み、前後の空白・改行を除いて返す TokenProvider を生成する。
+ * spiffe-helper 等による書き換え瞬間の一時的な空ファイル・欠損に備えて短時間リトライする。
+ */
+export function createFileTokenProvider(opts: FileTokenProviderOptions): TokenProvider {
+  const maxRetries = opts.maxRetries ?? 5;
+  const retryDelayMs = opts.retryDelayMs ?? 30;
+  return async () => {
+    let lastReason = "ファイルが空である";
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const raw = await readFile(opts.filePath, "utf8");
+        const trimmed = raw.trim();
+        if (trimmed.length > 0) {
+          return trimmed;
+        }
+        lastReason = "ファイルが空である";
+      } catch (e) {
+        const code =
+          typeof e === "object" && e !== null && "code" in e
+            ? String((e as { code?: unknown }).code)
+            : "";
+        const msg = e instanceof Error ? e.message : String(e);
+        if (NON_RETRYABLE_FS_CODES.has(code)) {
+          throw new Error(`${opts.label} (${opts.filePath}) を読み込めない: ${msg}`);
+        }
+        lastReason = msg;
+      }
+      if (attempt < maxRetries && retryDelayMs > 0) {
+        await Bun.sleep(retryDelayMs);
+      }
+    }
+    throw new Error(`${opts.label} (${opts.filePath}) を読み込めない: ${lastReason}`);
+  };
+}
+
+function resolveTokenChannel(opts: {
+  fileEnvName: string;
+  tokenEnvName: string;
+  configFieldName: string;
+  configFile: string | null | undefined;
+  env: NodeJS.ProcessEnv;
+}): { source: TokenSource; provider: TokenProvider } {
+  const filePath = opts.env[opts.fileEnvName]?.trim() || opts.configFile?.trim() || "";
+  if (filePath) {
+    return {
+      source: { kind: "file", path: filePath },
+      provider: createFileTokenProvider({ label: opts.fileEnvName, filePath }),
+    };
+  }
+  const token = opts.env[opts.tokenEnvName]?.trim() || "";
+  if (!token) {
+    throw new Error(
+      `${opts.fileEnvName}（または設定 JSON の ${opts.configFieldName}）あるいは ${opts.tokenEnvName} を指定すること`,
+    );
+  }
+  return {
+    source: { kind: "env", value: token },
+    provider: createStaticTokenProvider(token),
+  };
+}
+
+/** 実行時の環境変数と設定値を結合して解決する（環境変数を常に優先し、*_FILE 未設定時のみ静的トークンを使う）。 */
 export function resolveSlackRuntimeEnv(
-  config: Pick<SlackBotConfig, "apiBaseUrl">,
+  config: Pick<SlackBotConfig, "apiBaseUrl" | "botTokenFile" | "appTokenFile">,
   env: NodeJS.ProcessEnv = process.env,
 ): SlackRuntimeEnv {
   const rawBaseUrl = env.SLACK_API_BASE_URL?.trim() || config.apiBaseUrl?.trim() || "";
@@ -193,15 +304,27 @@ export function resolveSlackRuntimeEnv(
   }
   const apiBaseUrl = normalizeApiBaseUrl(rawBaseUrl, "SLACK_API_BASE_URL");
 
-  const botToken = env.SLACK_BOT_TOKEN?.trim() || "";
-  if (!botToken) {
-    throw new Error("SLACK_BOT_TOKEN を指定すること");
-  }
+  const bot = resolveTokenChannel({
+    fileEnvName: "SLACK_BOT_TOKEN_FILE",
+    tokenEnvName: "SLACK_BOT_TOKEN",
+    configFieldName: "botTokenFile",
+    configFile: config.botTokenFile,
+    env,
+  });
 
-  const appToken = env.SLACK_APP_TOKEN?.trim() || "";
-  if (!appToken) {
-    throw new Error("SLACK_APP_TOKEN を指定すること");
-  }
+  const app = resolveTokenChannel({
+    fileEnvName: "SLACK_APP_TOKEN_FILE",
+    tokenEnvName: "SLACK_APP_TOKEN",
+    configFieldName: "appTokenFile",
+    configFile: config.appTokenFile,
+    env,
+  });
 
-  return { apiBaseUrl, botToken, appToken };
+  return {
+    apiBaseUrl,
+    botTokenSource: bot.source,
+    appTokenSource: app.source,
+    botToken: bot.provider,
+    appToken: app.provider,
+  };
 }

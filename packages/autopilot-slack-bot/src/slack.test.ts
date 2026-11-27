@@ -1,11 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ServerWebSocket } from "bun";
+import { createFileTokenProvider } from "./config.ts";
 import { SlackApiError, SlackWebClient, SocketModeClient } from "./slack.ts";
 
 let servers: Array<{ stop: (closeActive?: boolean) => void }> = [];
+let tempDirs: string[] = [];
 afterEach(() => {
   for (const s of servers) s.stop(true);
   servers = [];
+  for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
+  tempDirs = [];
 });
 
 describe("SlackWebClient", () => {
@@ -66,6 +73,147 @@ describe("SlackWebClient", () => {
       SlackApiError,
     );
     expect(attempts).toBe(1);
+  });
+
+  test("TokenProvider 経由で API 呼び出しのたびに最新トークンを読み、読込エラー時は非リトライ失敗する", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "autopilot-slack-tok-"));
+    tempDirs.push(dir);
+    const botFile = join(dir, "bot.jwt");
+    const appFile = join(dir, "app.jwt");
+    writeFileSync(botFile, "bot-jwt-v1\n");
+    writeFileSync(appFile, "app-jwt-v1\n");
+
+    const seenAuth: Array<{ path: string; auth: string | null }> = [];
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        seenAuth.push({ path: url.pathname, auth: req.headers.get("authorization") });
+        if (url.pathname === "/slack/api/auth.test") {
+          return Response.json({ ok: true, user_id: "U_1", bot_id: "B_1", user: "bot" });
+        }
+        if (url.pathname === "/slack/api/chat.postMessage") {
+          return Response.json({ ok: true, channel: "C1", ts: "10.2" });
+        }
+        if (url.pathname === "/slack/api/apps.connections.open") {
+          return Response.json({ ok: true, url: "wss://monitoring.wpcapp.net/slack/socket" });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    servers.push(srv);
+
+    const client = new SlackWebClient({
+      apiBaseUrl: `http://127.0.0.1:${srv.port}/slack/api`,
+      botToken: createFileTokenProvider({ label: "SLACK_BOT_TOKEN_FILE", filePath: botFile }),
+      appToken: createFileTokenProvider({ label: "SLACK_APP_TOKEN_FILE", filePath: appFile }),
+    });
+
+    await client.authTest();
+    expect(await client.openSocketConnection()).toBe("wss://monitoring.wpcapp.net/slack/socket");
+
+    // ローテーション後
+    writeFileSync(botFile, "  bot-jwt-v2 \n");
+    writeFileSync(appFile, "app-jwt-v2\n");
+    await client.postMessage({ channel: "C1", thread_ts: "10.1", text: "hi" });
+    await client.openSocketConnection();
+
+    expect(seenAuth).toEqual([
+      { path: "/slack/api/auth.test", auth: "Bearer bot-jwt-v1" },
+      { path: "/slack/api/apps.connections.open", auth: "Bearer app-jwt-v1" },
+      { path: "/slack/api/chat.postMessage", auth: "Bearer bot-jwt-v2" },
+      { path: "/slack/api/apps.connections.open", auth: "Bearer app-jwt-v2" },
+    ]);
+
+    // 空ファイルになった場合は retryable: false の SlackApiError で即座に失敗する
+    writeFileSync(botFile, "");
+    const brokenClient = new SlackWebClient({
+      apiBaseUrl: `http://127.0.0.1:${srv.port}/slack/api`,
+      botToken: createFileTokenProvider({
+        label: "SLACK_BOT_TOKEN_FILE",
+        filePath: botFile,
+        maxRetries: 1,
+        retryDelayMs: 5,
+      }),
+      appToken: "app",
+    });
+    await expect(brokenClient.waitForAuthTest({ initialDelayMs: 10 })).rejects.toThrow(
+      /トークン取得に失敗した/,
+    );
+  });
+
+  test("getThreadReplies は url / details / source_kind / alert_status / level を保持する", async () => {
+    const srv = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/slack/api/conversations.replies") {
+          return Response.json({
+            ok: true,
+            has_more: false,
+            messages: [
+              {
+                ts: "100.1",
+                bot_id: "B_AM",
+                username: "alertmanager",
+                text: "[firing] HighErrorRate",
+                url: "https://prometheus.wpcapp.net/graph?g0.expr=up%3D%3D0",
+                details: JSON.stringify({
+                  fingerprint: "fp-1",
+                  labels: { alertname: "HighErrorRate", instance: "host-a" },
+                  annotations: { summary: "errors > 5%" },
+                }),
+                source_kind: "alert",
+                alert_status: "firing",
+                level: "critical",
+              },
+              {
+                ts: "100.2",
+                user: "U1",
+                thread_ts: "100.1",
+                text: "確認して",
+                url: "",
+                details: { custom: "obj-detail" },
+              },
+            ],
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    servers.push(srv);
+
+    const client = new SlackWebClient({
+      apiBaseUrl: `http://127.0.0.1:${srv.port}/slack/api`,
+      botToken: "bot",
+      appToken: "app",
+    });
+
+    const replies = await client.getThreadReplies("C1", "100.1");
+    expect(replies).toEqual([
+      {
+        ts: "100.1",
+        bot_id: "B_AM",
+        username: "alertmanager",
+        text: "[firing] HighErrorRate",
+        url: "https://prometheus.wpcapp.net/graph?g0.expr=up%3D%3D0",
+        details: JSON.stringify({
+          fingerprint: "fp-1",
+          labels: { alertname: "HighErrorRate", instance: "host-a" },
+          annotations: { summary: "errors > 5%" },
+        }),
+        source_kind: "alert",
+        alert_status: "firing",
+        level: "critical",
+      },
+      {
+        ts: "100.2",
+        user: "U1",
+        thread_ts: "100.1",
+        text: "確認して",
+        details: { custom: "obj-detail" },
+      },
+    ]);
   });
 });
 

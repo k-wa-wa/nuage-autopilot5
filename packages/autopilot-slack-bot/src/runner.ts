@@ -23,7 +23,7 @@ import { buildSlackPrompt, type SlackThreadMessage, splitSlackMessage } from "./
 import { ThreadQueue } from "./queue.ts";
 import { type BotIdentity, EventRouter, type RouteDecision, type SlackEvent } from "./router.ts";
 import { SlackWebClient, SocketModeClient } from "./slack.ts";
-import { ThreadSessionStore, threadKey } from "./state.ts";
+import { type ThreadSessionState, ThreadSessionStore, threadKey } from "./state.ts";
 
 function appendLog(logPath: string, prefix: string, msg: string): void {
   const time = new Date().toISOString();
@@ -81,9 +81,11 @@ function buildAgentEnvOverrides(env: NodeJS.ProcessEnv = process.env): Record<st
   const overrides: Record<string, undefined> = {
     SLACK_BOT_TOKEN: undefined,
     SLACK_APP_TOKEN: undefined,
+    SLACK_BOT_TOKEN_FILE: undefined,
+    SLACK_APP_TOKEN_FILE: undefined,
   };
   for (const key of Object.keys(env)) {
-    if (/^SLACK_.*_TOKEN$/.test(key)) overrides[key] = undefined;
+    if (/^SLACK_.*_TOKEN(?:_FILE)?$/.test(key)) overrides[key] = undefined;
   }
   return overrides;
 }
@@ -161,6 +163,7 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
     appToken: runtimeEnv.appToken,
   });
   const sessionStore = new ThreadSessionStore(stateDir, config.name);
+  const fallbackSessions = new Map<string, ThreadSessionState>();
   const router = new EventRouter();
   const queue = new ThreadQueue(config.concurrency);
 
@@ -194,19 +197,36 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
     }
   };
 
+  const saveSessionSafely = (state: ThreadSessionState): void => {
+    const k = threadKey(state.channel, state.threadTs);
+    try {
+      sessionStore.save(state);
+      fallbackSessions.delete(k);
+    } catch (saveErr) {
+      fallbackSessions.set(k, state);
+      error(
+        `セッション状態の保存に失敗: key=${k} reason=${
+          saveErr instanceof Error ? saveErr.message : String(saveErr)
+        }`,
+      );
+    }
+  };
+
+  type ThreadHistoryFetchResult =
+    | { ok: true; messages: SlackThreadMessage[]; error: null }
+    | { ok: false; messages: null; error: string };
+
   const fetchThreadMessagesSafe = async (
     channel: string,
     threadTs: string,
-  ): Promise<SlackThreadMessage[]> => {
+  ): Promise<ThreadHistoryFetchResult> => {
     try {
-      return await slackClient.getThreadReplies(channel, threadTs);
+      const messages = await slackClient.getThreadReplies(channel, threadTs);
+      return { ok: true, messages, error: null };
     } catch (e) {
-      warn(
-        `conversations.replies 失敗 (channel=${channel}, ts=${threadTs}): ${
-          e instanceof Error ? e.message : String(e)
-        }`,
-      );
-      return [];
+      const msg = e instanceof Error ? e.message : String(e);
+      warn(`conversations.replies 失敗 (channel=${channel}, ts=${threadTs}): ${msg}`);
+      return { ok: false, messages: null, error: msg };
     }
   };
 
@@ -296,7 +316,9 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
   const handleDecision = async (decision: RouteDecision, identity: BotIdentity): Promise<void> => {
     const key = threadKey(decision.channel, decision.threadTs);
     const turnId = `${sanitizeFileSegment(decision.channel)}-${sanitizeFileSegment(decision.messageTs)}-${randomUUID().slice(0, 8)}`;
-    const saved = sessionStore.get(decision.channel, decision.threadTs);
+    const saved =
+      sessionStore.get(decision.channel, decision.threadTs) ?? fallbackSessions.get(key) ?? null;
+    let replyPosted = false;
 
     try {
       log(`スレッド処理開始: key=${key}, trigger=${decision.kind}, ts=${decision.messageTs}`);
@@ -374,10 +396,7 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
               warn(
                 `${formatInvocation(resumeInv)}: resume が利用不能 (exit ${r.code}) のためスレッド履歴を読み直して新規セッションで引き継ぐ`,
               );
-              const threadMessages = await fetchThreadMessagesSafe(
-                decision.channel,
-                decision.threadTs,
-              );
+              const history = await fetchThreadMessagesSafe(decision.channel, decision.threadTs);
               const fallbackPrompt = buildSlackPrompt({
                 config,
                 botDisplayName,
@@ -386,14 +405,15 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
                 workdir,
                 decision,
                 sessionMode: "fallback-start",
-                threadMessages,
+                threadMessages: history.messages,
+                threadHistoryError: history.error,
               });
               result = await runAgentChain(fallbackPrompt, chain, deadline, turnId);
             }
           }
         }
       } else {
-        const threadMessages = await fetchThreadMessagesSafe(decision.channel, decision.threadTs);
+        const history = await fetchThreadMessagesSafe(decision.channel, decision.threadTs);
         const startPrompt = buildSlackPrompt({
           config,
           botDisplayName,
@@ -402,7 +422,8 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
           workdir,
           decision,
           sessionMode: "start",
-          threadMessages,
+          threadMessages: history.messages,
+          threadHistoryError: history.error,
         });
         result = await runAgentChain(startPrompt, chain, deadline, turnId);
       }
@@ -412,7 +433,8 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
       const nowIso = new Date().toISOString();
       if (result.ok) {
         const replied = await postReply(decision.channel, decision.threadTs, result.text);
-        sessionStore.save({
+        if (replied) replyPosted = true;
+        saveSessionSafely({
           botName: config.name,
           channel: decision.channel,
           threadTs: decision.threadTs,
@@ -433,8 +455,9 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
           decision.threadTs,
           `[エラー] 調査・処理に失敗した: ${result.reason}`,
         );
+        if (replied) replyPosted = true;
         if (replied && !saved) {
-          sessionStore.save({
+          saveSessionSafely({
             botName: config.name,
             channel: decision.channel,
             threadTs: decision.threadTs,
@@ -451,15 +474,15 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
       if (shutdownController.signal.aborted) return;
       const reason = e instanceof Error ? e.message : String(e);
       error(`スレッド処理中に予期しないエラー: key=${key} reason=${reason}`);
-      const replied = await postReply(
-        decision.channel,
-        decision.threadTs,
-        `[エラー] 調査・処理中にエラーが発生した: ${reason}`,
-      );
-      if (replied && !saved) {
-        const nowIso = new Date().toISOString();
-        try {
-          sessionStore.save({
+      if (!replyPosted) {
+        const replied = await postReply(
+          decision.channel,
+          decision.threadTs,
+          `[エラー] 調査・処理中にエラーが発生した: ${reason}`,
+        );
+        if (replied && !saved) {
+          const nowIso = new Date().toISOString();
+          saveSessionSafely({
             botName: config.name,
             channel: decision.channel,
             threadTs: decision.threadTs,
@@ -470,12 +493,6 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
             createdAt: nowIso,
             updatedAt: nowIso,
           });
-        } catch (saveErr) {
-          error(
-            `セッション状態の保存に失敗: key=${key} reason=${
-              saveErr instanceof Error ? saveErr.message : String(saveErr)
-            }`,
-          );
         }
       }
     }
@@ -500,8 +517,14 @@ export async function runSlackBot(opts: RunSlackBotOptions): Promise<number> {
     const onEvent = (event: SlackEvent) => {
       const decision = router.route(event, {
         identity,
-        isParticipatingThread: (ch, ts) =>
-          sessionStore.hasParticipated(ch, ts) || queue.hasPendingOrActive(threadKey(ch, ts)),
+        isParticipatingThread: (ch, ts) => {
+          const k = threadKey(ch, ts);
+          return (
+            sessionStore.hasParticipated(ch, ts) ||
+            Boolean(fallbackSessions.get(k)?.participated) ||
+            queue.hasPendingOrActive(k)
+          );
+        },
       });
       if (!decision) return;
 

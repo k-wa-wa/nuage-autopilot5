@@ -20,9 +20,22 @@ describe("autopilot-slack-bot E2E", () => {
   test("check-config は妥当な設定で 0、不正な設定で 2 を返す", async () => {
     const w = setupWorld(cleanups);
     const okCfg = join(w.root, "ok.json");
-    writeFileSync(okCfg, JSON.stringify({ name: "valid-bot", soulFile: w.soul }));
+    writeFileSync(
+      okCfg,
+      JSON.stringify({
+        name: "valid-bot",
+        soulFile: w.soul,
+        botTokenFile: "/run/spiffe/bot.jwt",
+        appTokenFile: "/run/spiffe/app.jwt",
+      }),
+    );
     const badCfg = join(w.root, "bad.json");
     writeFileSync(badCfg, JSON.stringify({ name: "bad-bot", soulFile: join(w.root, "none.md") }));
+    const badTokenPathCfg = join(w.root, "bad-token-path.json");
+    writeFileSync(
+      badTokenPathCfg,
+      JSON.stringify({ name: "bad-token-bot", soulFile: w.soul, botTokenFile: "relative/bot.jwt" }),
+    );
 
     const runCli = async (args: string[]) => {
       const p = Bun.spawn([process.execPath, MAIN, ...args], {
@@ -45,6 +58,10 @@ describe("autopilot-slack-bot E2E", () => {
     const r2 = await runCli(["check-config", "--file", badCfg]);
     expect(r2.code).toBe(2);
     expect(r2.stderr).toContain("soulFile");
+
+    const r3 = await runCli(["check-config", "--file", badTokenPathCfg]);
+    expect(r3.code).toBe(2);
+    expect(r3.stderr).toContain("botTokenFile");
   });
 
   test("起動リトライ・重複排除・会話継続 (resume)・履歴引き継ぎ・自己ループ防止が連動して動く", async () => {

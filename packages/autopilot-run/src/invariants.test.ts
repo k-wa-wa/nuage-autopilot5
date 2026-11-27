@@ -153,6 +153,8 @@ describe("禁止事項はすべての自律ターンに届く", () => {
         agent: null,
         level: "standard",
         apiBaseUrl: null,
+        botTokenFile: null,
+        appTokenFile: null,
         workdir: null,
         timeoutSec: 3600,
         concurrency: 3,

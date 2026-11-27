@@ -128,6 +128,10 @@ let
           soulFile = "${bot.soul}";
           inherit (bot) agent level;
           apiBaseUrl = if bot.apiBaseUrl != null then bot.apiBaseUrl else cfg.slackBotDefaults.apiBaseUrl;
+          botTokenFile =
+            if bot.botTokenFile != null then bot.botTokenFile else cfg.slackBotDefaults.botTokenFile;
+          appTokenFile =
+            if bot.appTokenFile != null then bot.appTokenFile else cfg.slackBotDefaults.appTokenFile;
           workdir = if bot.workdir != null then bot.workdir else cfg.slackBotDefaults.workdir;
           timeoutSec = if bot.timeoutSec != null then bot.timeoutSec else cfg.slackBotDefaults.timeoutSec;
           concurrency = if bot.concurrency != null then bot.concurrency else cfg.slackBotDefaults.concurrency;
@@ -333,6 +337,16 @@ in
         default = null;
         description = "Slack Bot 用 API ベース URL の既定値（環境変数 SLACK_API_BASE_URL が優先される）。";
       };
+      botTokenFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Slack Bot 用トークンファイルの既定パス（環境変数 SLACK_BOT_TOKEN_FILE が優先される）。";
+      };
+      appTokenFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Slack App 用トークンファイルの既定パス（環境変数 SLACK_APP_TOKEN_FILE が優先される）。";
+      };
       envFile = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -389,6 +403,16 @@ in
               type = lib.types.nullOr lib.types.str;
               default = null;
               description = "Slack 互換 Web API ベース URL。null 時は slackBotDefaults.apiBaseUrl を使う（実行時は SLACK_API_BASE_URL が優先）。";
+            };
+            botTokenFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Slack Bot トークンファイルパス。null 時は slackBotDefaults.botTokenFile を使う（実行時は SLACK_BOT_TOKEN_FILE が優先）。";
+            };
+            appTokenFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "Slack App トークンファイルパス。null 時は slackBotDefaults.appTokenFile を使う（実行時は SLACK_APP_TOKEN_FILE が優先）。";
             };
             workdir = lib.mkOption {
               type = lib.types.nullOr lib.types.str;

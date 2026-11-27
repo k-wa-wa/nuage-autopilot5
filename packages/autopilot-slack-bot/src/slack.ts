@@ -1,3 +1,4 @@
+import type { TokenProvider } from "./config.ts";
 import type { SlackThreadMessage } from "./prompt.ts";
 import type { BotIdentity, SlackEvent } from "./router.ts";
 
@@ -29,10 +30,14 @@ export class SlackApiError extends Error {
 
 export interface SlackWebClientOptions {
   apiBaseUrl: string;
-  botToken: string;
-  appToken: string;
+  botToken: string | TokenProvider;
+  appToken: string | TokenProvider;
   fetchFn?: typeof fetch;
   requestTimeoutMs?: number;
+}
+
+function toTokenProvider(tokenOrProvider: string | TokenProvider): TokenProvider {
+  return typeof tokenOrProvider === "function" ? tokenOrProvider : async () => tokenOrProvider;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,24 +65,37 @@ async function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<boolean
  */
 export class SlackWebClient {
   readonly apiBaseUrl: string;
-  private readonly botToken: string;
-  private readonly appToken: string;
+  private readonly botTokenProvider: TokenProvider;
+  private readonly appTokenProvider: TokenProvider;
   private readonly fetchFn: typeof fetch;
   private readonly requestTimeoutMs: number;
 
   constructor(opts: SlackWebClientOptions) {
     this.apiBaseUrl = opts.apiBaseUrl.replace(/\/+$/, "");
-    this.botToken = opts.botToken;
-    this.appToken = opts.appToken;
+    this.botTokenProvider = toTokenProvider(opts.botToken);
+    this.appTokenProvider = toTokenProvider(opts.appToken);
     this.fetchFn = opts.fetchFn ?? fetch;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 15_000;
   }
 
   private async callApi(
     method: string,
-    token: string,
+    getToken: TokenProvider,
     body: Record<string, unknown> = {},
   ): Promise<Record<string, unknown>> {
+    let token: string;
+    try {
+      token = (await getToken()).trim();
+      if (!token) {
+        throw new Error("トークンが空である");
+      }
+    } catch (e) {
+      throw new SlackApiError(
+        `${method}: トークン取得に失敗した (${e instanceof Error ? e.message : String(e)})`,
+        { code: "token_read_error", retryable: false },
+      );
+    }
+
     const url = `${this.apiBaseUrl}/${method}`;
     let res: Response;
     try {
@@ -138,7 +156,7 @@ export class SlackWebClient {
 
   private async callWithRetry(
     method: string,
-    token: string,
+    getToken: TokenProvider,
     body: Record<string, unknown>,
     maxRetries = 2,
     retryDelayMs = 500,
@@ -146,7 +164,7 @@ export class SlackWebClient {
     let lastError: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
-        return await this.callApi(method, token, body);
+        return await this.callApi(method, getToken, body);
       } catch (e) {
         lastError = e;
         if (!(e instanceof SlackApiError) || !e.retryable || attempt === maxRetries) {
@@ -159,7 +177,7 @@ export class SlackWebClient {
   }
 
   async authTest(): Promise<BotIdentity> {
-    const data = await this.callApi("auth.test", this.botToken);
+    const data = await this.callApi("auth.test", this.botTokenProvider);
     if (typeof data.user_id !== "string" || !data.user_id) {
       throw new SlackApiError("auth.test: user_id が応答に含まれていない", {
         code: "invalid_response",
@@ -205,7 +223,7 @@ export class SlackWebClient {
   }
 
   async openSocketConnection(): Promise<string> {
-    const data = await this.callApi("apps.connections.open", this.appToken);
+    const data = await this.callApi("apps.connections.open", this.appTokenProvider);
     if (typeof data.url !== "string" || !data.url) {
       throw new SlackApiError("apps.connections.open: url が応答に含まれていない", {
         code: "invalid_response",
@@ -222,7 +240,7 @@ export class SlackWebClient {
     for (let page = 0; page < 10; page++) {
       const body: Record<string, unknown> = { channel, ts, limit: 200 };
       if (cursor) body.cursor = cursor;
-      const data = await this.callWithRetry("conversations.replies", this.botToken, body);
+      const data = await this.callWithRetry("conversations.replies", this.botTokenProvider, body);
       if (Array.isArray(data.messages)) {
         for (const item of data.messages) {
           if (isRecord(item) && typeof item.ts === "string") {
@@ -233,6 +251,19 @@ export class SlackWebClient {
               ...(typeof item.username === "string" ? { username: item.username } : {}),
               ...(typeof item.text === "string" ? { text: item.text } : {}),
               ...(typeof item.thread_ts === "string" ? { thread_ts: item.thread_ts } : {}),
+              ...(typeof item.url === "string" && item.url ? { url: item.url } : {}),
+              ...(typeof item.details === "string" && item.details
+                ? { details: item.details }
+                : isRecord(item.details)
+                  ? { details: item.details }
+                  : {}),
+              ...(typeof item.source_kind === "string" && item.source_kind
+                ? { source_kind: item.source_kind }
+                : {}),
+              ...(typeof item.alert_status === "string" && item.alert_status
+                ? { alert_status: item.alert_status }
+                : {}),
+              ...(typeof item.level === "string" && item.level ? { level: item.level } : {}),
             });
           }
         }
@@ -258,7 +289,7 @@ export class SlackWebClient {
       text: params.text,
     };
     if (params.thread_ts) body.thread_ts = params.thread_ts;
-    const data = await this.callWithRetry("chat.postMessage", this.botToken, body);
+    const data = await this.callWithRetry("chat.postMessage", this.botTokenProvider, body);
     return {
       channel: typeof data.channel === "string" ? data.channel : params.channel,
       ts: typeof data.ts === "string" ? data.ts : "",
